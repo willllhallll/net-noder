@@ -1,0 +1,30 @@
+{
+  // --- Base image ---
+  "name": "Claude Code Box",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+
+  // --- Features ---
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
+    "ghcr.io/devcontainers-community/npm-features/prettier": 1,
+  },
+
+  // --- Editor customizations ---
+  "customizations": {
+    "vscode": {
+      "extensions": ["esbenp.prettier-vscode"],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+      },
+    },
+  },
+  // --- Persist Claude Session ---
+  "mounts": [
+    "source=claude-code-config,target=/home/vscode/.claude,type=volume",
+  ],
+
+  // Runs once on container creation (not on every start) before VS Code attaches.
+  // Ensures the mounted volume is owned by vscode so Claude can read/write its config.
+  "onCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo chmod -R u+rw /home/vscode/.claude"
+}
