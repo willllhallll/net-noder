@@ -13,10 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from . import db, queries
 from .models import (
     ConnectionDetail,
-    EphemeralPorts,
     Graph,
     Node,
     NodeDetail,
+    ReplyPorts,
     Stats,
 )
 
@@ -85,16 +85,19 @@ def get_connection(a: str, b: str):
     return d
 
 
-@app.get("/api/conversation/ports", response_model=EphemeralPorts)
+@app.get("/api/conversation/ports", response_model=ReplyPorts)
 def get_conversation_ports(
     a: str,
     b: str,
     proto: str,
     server_port: int,
     cast: str,
+    server_is_a: bool,
     limit: int = Query(50, ge=1, le=500),
 ):
-    d = queries.ephemeral_ports(_cursor(), a, b, proto, server_port, cast, limit)
+    d = queries.reply_ports(
+        _cursor(), a, b, proto, server_port, cast, server_is_a, limit
+    )
     if d is None:
         raise HTTPException(404, detail="No such conversation")
     return d

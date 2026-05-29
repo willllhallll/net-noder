@@ -9,12 +9,12 @@ import ipaddress
 import duckdb
 
 from . import config
-from .transform import CAST_SQL, PROTO_SQL, SERVER_PORT_SQL
+from .transform import CAST_SQL, PROTO_SQL, SERVICE_IS_SRC_SQL
 
-# Max ephemeral/client ports retained per conversation row (top-N by bytes). Bounds
-# the size of conversation_ports; the per-conversation total is still recorded on
-# conversations (client_port_count).
-_EPHEMERAL_KEEP = 50
+# Max reply ports retained per conversation row (top-N by bytes). Bounds the size of
+# conversation_ports; the per-conversation total is still recorded on conversations
+# (reply_port_count).
+_REPLY_KEEP = 50
 
 
 def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int = 8) -> None:
@@ -28,31 +28,30 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
     con.execute(f"SET threads={max(1, threads)}")
     con.execute(f"SET temp_directory='{config.DATA_DIR}'")
 
-    # Outer query derives, from the inner query's computed server_port:
-    #   client_port    - the side that isn't the server port.
-    #   server_is_a_row - whether ip_a owns the server port on this packet. The side
-    #                     that used server_port is the server; that side is ip_a iff
-    #                     it was the source (a_is_src) for a src match, else iff it
-    #                     was the destination (NOT a_is_src) for a dst match.
+    # Outer query derives, from the inner query's per-packet service_is_src:
+    #   server_port     - the service endpoint's port.
+    #   reply_port      - the other (replying) side's port. Generalises the old
+    #                     ephemeral client port: many ephemeral ports in a normal
+    #                     client->server flow, or a single service port when both
+    #                     sides talk on service ports.
+    #   server_is_a_row - whether ip_a owns the service port on this packet: ip_a
+    #                     when the service side is the source (a_is_src), else when
+    #                     it's the destination (NOT a_is_src).
     con.execute(f"""
         CREATE OR REPLACE TEMP VIEW flows AS
         SELECT *,
-            CASE WHEN server_port IS NULL THEN NULL
-                 WHEN src_port = server_port THEN dst_port
-                 WHEN dst_port = server_port THEN src_port
-                 ELSE NULLIF(GREATEST(src_port, dst_port), server_port)
-            END AS client_port,
-            CASE WHEN server_port IS NULL THEN NULL
-                 WHEN src_port = server_port THEN a_is_src
-                 WHEN dst_port = server_port THEN NOT a_is_src
-                 ELSE NULL
-            END AS server_is_a_row
+            CASE WHEN service_is_src IS NULL THEN NULL
+                 WHEN service_is_src THEN src_port ELSE dst_port END AS server_port,
+            CASE WHEN service_is_src IS NULL THEN NULL
+                 WHEN service_is_src THEN dst_port ELSE src_port END AS reply_port,
+            CASE WHEN service_is_src IS NULL THEN NULL
+                 WHEN service_is_src THEN a_is_src ELSE NOT a_is_src END AS server_is_a_row
         FROM (
             SELECT
                 src_ip, dst_ip, ts, len, src_port, dst_port,
-                {PROTO_SQL}        AS proto,
-                {CAST_SQL}         AS cast_type,
-                {SERVER_PORT_SQL}  AS server_port,
+                {PROTO_SQL}          AS proto,
+                {CAST_SQL}           AS cast_type,
+                {SERVICE_IS_SRC_SQL} AS service_is_src,
                 LEAST(src_ip, dst_ip)    AS ip_a,
                 GREATEST(src_ip, dst_ip) AS ip_b,
                 (src_ip <= dst_ip)       AS a_is_src
@@ -84,9 +83,10 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
             )
         """)
 
-        # Per-conversation directional rollup, read straight from flows so the
-        # client->server direction survives. server_is_a is resolved by majority
-        # bytes so a rare per-packet flip can't mislabel the server side.
+        # Per-conversation directional rollup, keyed by the service endpoint
+        # (server_port + server_is_a) so a service port shared by both ends yields
+        # two directional rows. server_is_a is deterministic per packet, so it's a
+        # plain group key here.
         con.execute("""
             INSERT INTO conversations
             SELECT c.id, f.proto, f.server_port, f.cast_type,
@@ -94,43 +94,40 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
                    SUM(CASE WHEN f.a_is_src THEN f.len ELSE 0 END) AS bytes_a2b,
                    SUM(CASE WHEN f.a_is_src THEN 0   ELSE 1 END) AS pkts_b2a,
                    SUM(CASE WHEN f.a_is_src THEN 0 ELSE f.len END) AS bytes_b2a,
-                   COUNT(DISTINCT f.client_port) AS client_port_count,
-                   CASE WHEN f.server_port IS NULL THEN NULL
-                        ELSE SUM(CASE WHEN f.server_is_a_row THEN f.len ELSE 0 END)
-                           >= SUM(CASE WHEN f.server_is_a_row IS NOT NULL
-                                            AND NOT f.server_is_a_row THEN f.len ELSE 0 END)
-                   END AS server_is_a,
+                   COUNT(DISTINCT f.reply_port) AS reply_port_count,
+                   f.server_is_a_row AS server_is_a,
                    MIN(f.ts) AS first_seen, MAX(f.ts) AS last_seen
             FROM flows f
             JOIN connections c USING (ip_a, ip_b)
-            GROUP BY c.id, f.proto, f.server_port, f.cast_type
+            GROUP BY c.id, f.proto, f.server_port, f.cast_type, f.server_is_a_row
         """)
 
-        # Finest-grain breakdown (per ephemeral/client port), materialised once for
-        # the top-N ports rollup so it doesn't rescan the parquet.
+        # Finest-grain breakdown (per reply port), materialised once for the top-N
+        # ports rollup so it doesn't rescan the parquet.
         con.execute("DROP TABLE IF EXISTS conv_full")
         con.execute("""
             CREATE TEMP TABLE conv_full AS
-            SELECT ip_a, ip_b, proto, server_port, cast_type, client_port,
+            SELECT ip_a, ip_b, proto, server_port, cast_type, server_is_a_row, reply_port,
                    COUNT(*) AS pkts, SUM(len) AS bytes
             FROM flows
-            GROUP BY ip_a, ip_b, proto, server_port, cast_type, client_port
+            GROUP BY ip_a, ip_b, proto, server_port, cast_type, server_is_a_row, reply_port
         """)
 
-        # Top-N ephemeral ports per conversation (by bytes).
+        # Top-N reply ports per conversation (by bytes).
         con.execute(f"""
             INSERT INTO conversation_ports
-            SELECT c.id, f.proto, f.server_port, f.cast_type, f.client_port,
-                   f.pkts, f.bytes
+            SELECT c.id, f.proto, f.server_port, f.cast_type, f.server_is_a_row,
+                   f.reply_port, f.pkts, f.bytes
             FROM (
                 SELECT *, row_number() OVER (
-                           PARTITION BY ip_a, ip_b, proto, server_port, cast_type
+                           PARTITION BY ip_a, ip_b, proto, server_port, cast_type,
+                                        server_is_a_row
                            ORDER BY bytes DESC) AS rk
                 FROM conv_full
-                WHERE client_port IS NOT NULL
+                WHERE reply_port IS NOT NULL
             ) f
             JOIN connections c USING (ip_a, ip_b)
-            WHERE f.rk <= {_EPHEMERAL_KEEP}
+            WHERE f.rk <= {_REPLY_KEEP}
         """)
 
         con.execute("""

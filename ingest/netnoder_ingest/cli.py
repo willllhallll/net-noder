@@ -119,6 +119,15 @@ def main(argv=None) -> int:
     except FileNotFoundError:
         pass  # no names provided; leave any existing names untouched
 
+    # Refresh the port -> service reference too (also decoupled from packets).
+    from .portmap import load_port_services
+
+    try:
+        n = load_port_services(con, config.PORTMAP_PATH)
+        print(f"port services loaded: {n} (from {config.PORTMAP_PATH})")
+    except FileNotFoundError:
+        pass  # no portmap CSV; leave any existing port_services untouched
+
     e, c, s = con.execute(
         "SELECT (SELECT count(*) FROM endpoints), "
         "(SELECT count(*) FROM connections), (SELECT count(*) FROM conversations)"

@@ -215,12 +215,19 @@ def connection(cur, a: str, b: str):
     ).fetchone()
     if not c:
         return None
+    # service: the port_services description for this conversation's server_port,
+    # joined at query time (like names) so the registry can be refreshed without
+    # re-aggregating. server_port is per-direction, so the service matches the arrow.
     convs = cur.execute(
-        "SELECT l4_proto, server_port, cast_type, "
-        "pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, "
-        "coalesce(client_port_count, 0), server_is_a, first_seen, last_seen "
-        "FROM conversations WHERE connection_id=? "
-        "ORDER BY (bytes_a2b + bytes_b2a) DESC",
+        "SELECT cv.l4_proto, cv.server_port, cv.cast_type, "
+        "cv.pkts_a2b, cv.bytes_a2b, cv.pkts_b2a, cv.bytes_b2a, "
+        "coalesce(cv.reply_port_count, 0), cv.server_is_a, cv.first_seen, cv.last_seen, "
+        "nullif(ps.description, '') "
+        "FROM conversations cv "
+        "LEFT JOIN port_services ps "
+        "  ON ps.port = cv.server_port AND ps.transport = lower(cv.l4_proto) "
+        "WHERE cv.connection_id=? "
+        "ORDER BY (cv.bytes_a2b + cv.bytes_b2a) DESC",
         [c[0]],
     ).fetchall()
     return {
@@ -231,16 +238,17 @@ def connection(cur, a: str, b: str):
         "conversations": [
             {"l4_proto": s[0], "server_port": s[1], "cast_type": s[2],
              "pkts_a2b": s[3], "bytes_a2b": s[4], "pkts_b2a": s[5], "bytes_b2a": s[6],
-             "client_port_count": s[7], "server_is_a": s[8],
-             "first_seen": s[9], "last_seen": s[10]}
+             "reply_port_count": s[7], "server_is_a": s[8],
+             "first_seen": s[9], "last_seen": s[10], "service": s[11]}
             for s in convs
         ],
     }
 
 
-def ephemeral_ports(cur, a: str, b: str, proto: str, server_port: int,
-                    cast: str, limit: int = 50):
-    """Top ephemeral/client ports for one conversation of a connection."""
+def reply_ports(cur, a: str, b: str, proto: str, server_port: int,
+                cast: str, server_is_a: bool, limit: int = 50):
+    """Top reply ports for one conversation of a connection. server_is_a selects
+    which side owns server_port, disambiguating two rows that share a server port."""
     ip_a, ip_b = sorted([a, b])
     conn = cur.execute(
         "SELECT id FROM connections WHERE ip_a=? AND ip_b=?", [ip_a, ip_b]
@@ -249,17 +257,19 @@ def ephemeral_ports(cur, a: str, b: str, proto: str, server_port: int,
         return None
     cid = conn[0]
     total = cur.execute(
-        "SELECT coalesce(client_port_count, 0) FROM conversations "
-        "WHERE connection_id=? AND l4_proto=? AND server_port=? AND cast_type=?",
-        [cid, proto, server_port, cast],
+        "SELECT coalesce(reply_port_count, 0) FROM conversations "
+        "WHERE connection_id=? AND l4_proto=? AND server_port=? AND cast_type=? "
+        "AND server_is_a=?",
+        [cid, proto, server_port, cast, server_is_a],
     ).fetchone()
     if total is None:
         return None
     rows = cur.execute(
-        "SELECT client_port, pkts, bytes FROM conversation_ports "
+        "SELECT reply_port, pkts, bytes FROM conversation_ports "
         "WHERE connection_id=? AND l4_proto=? AND server_port=? AND cast_type=? "
+        "AND server_is_a=? "
         "ORDER BY bytes DESC LIMIT ?",
-        [cid, proto, server_port, cast, _clamp(limit, 500)],
+        [cid, proto, server_port, cast, server_is_a, _clamp(limit, 500)],
     ).fetchall()
     ports = [{"port": r[0], "pkts": r[1], "bytes": r[2]} for r in rows]
     return {

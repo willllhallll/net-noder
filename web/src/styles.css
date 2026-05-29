@@ -294,8 +294,8 @@ table.kv td:first-child {
   white-space: nowrap;
 }
 
-/* Ephemeral reply ports */
-.ephemeral-head {
+/* Reply ports */
+.reply-head {
   margin-bottom: 6px;
   font-size: 11px;
 }

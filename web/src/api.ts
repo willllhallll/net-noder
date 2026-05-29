@@ -1,9 +1,9 @@
 import type {
   ConnectionDetail,
-  EphemeralPorts,
   Graph,
   NodeDetail,
   NodeT,
+  ReplyPorts,
   Stats,
 } from "./types";
 
@@ -25,16 +25,17 @@ export const api = {
     get<Graph>(`/api/node/${enc(ip)}/neighbors?limit=${limit}`),
   connection: (a: string, b: string) =>
     get<ConnectionDetail>(`/api/connection?a=${enc(a)}&b=${enc(b)}`),
-  ephemeralPorts: (
+  replyPorts: (
     a: string,
     b: string,
     proto: string,
     serverPort: number,
-    cast: string
+    cast: string,
+    serverIsA: boolean
   ) =>
-    get<EphemeralPorts>(
+    get<ReplyPorts>(
       `/api/conversation/ports?a=${enc(a)}&b=${enc(b)}&proto=${enc(proto)}` +
-        `&server_port=${serverPort}&cast=${enc(cast)}`
+        `&server_port=${serverPort}&cast=${enc(cast)}&server_is_a=${serverIsA}`
     ),
   search: (q: string) => get<NodeT[]>(`/api/search?q=${enc(q)}`),
 };

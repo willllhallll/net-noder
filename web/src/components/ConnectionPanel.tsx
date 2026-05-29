@@ -1,7 +1,7 @@
 import type {
   Conversation,
   ConnectionDetail,
-  EphemeralPorts,
+  ReplyPorts,
   LabelMode,
 } from "../types";
 import {
@@ -14,7 +14,7 @@ import {
 } from "../format";
 import Drawer from "./Drawer";
 
-type ConvPorts = EphemeralPorts | "loading" | null;
+type ConvPorts = ReplyPorts | "loading" | null;
 
 interface Props {
   conn: ConnectionDetail;
@@ -54,7 +54,7 @@ export default function ConnectionPanel({
 }
 
 // Details of one conversation: client/server identification, per-direction
-// volume, and the ephemeral reply ports.
+// volume, and the reply ports.
 function ConversationBody({
   conn,
   conv,
@@ -78,8 +78,10 @@ function ConversationBody({
       <div className="badges">
         <span className="badge">{conv.l4_proto}</span>
         <span className="badge">{conv.cast_type}</span>
-        {conv.client_port_count > 0 && (
-          <span className="badge">{conv.client_port_count} ephemeral</span>
+        {conv.reply_port_count > 0 && (
+          <span className="badge">
+            {conv.reply_port_count} reply port{conv.reply_port_count === 1 ? "" : "s"}
+          </span>
         )}
       </div>
 
@@ -95,6 +97,10 @@ function ConversationBody({
 
       <table className="kv">
         <tbody>
+          <tr>
+            <td>Service</td>
+            <td>{conv.service ?? "No Service Info"}</td>
+          </tr>
           <tr>
             <td>{directed ? "Client → Server" : `${conn.ip_a} → ${conn.ip_b}`}</td>
             <td>
@@ -118,11 +124,11 @@ function ConversationBody({
         </tbody>
       </table>
 
-      <h3>Ephemeral ports</h3>
+      <h3>Reply ports</h3>
       {ports === "loading" ? (
         <span className="muted">loading…</span>
       ) : ports ? (
-        <EphemeralList data={ports} />
+        <ReplyList data={ports} />
       ) : (
         <span className="muted">none recorded</span>
       )}
@@ -130,11 +136,11 @@ function ConversationBody({
   );
 }
 
-function EphemeralList({ data }: { data: EphemeralPorts }) {
+function ReplyList({ data }: { data: ReplyPorts }) {
   return (
-    <div className="ephemeral">
-      <div className="ephemeral-head muted">
-        {data.total} ephemeral port{data.total === 1 ? "" : "s"} talking to{" "}
+    <div className="reply">
+      <div className="reply-head muted">
+        {data.total} reply port{data.total === 1 ? "" : "s"} talking to{" "}
         {data.l4_proto}/{data.server_port}
         {data.truncated ? ` · showing top ${data.ports.length} by bytes` : ""}
       </div>

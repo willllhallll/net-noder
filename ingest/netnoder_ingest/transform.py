@@ -39,22 +39,40 @@ CASE
 END
 """
 
-# Well-known/registered service ports used to disambiguate which side is the server.
-_WELLKNOWN = (
-    "(20,21,22,23,25,53,67,68,69,80,110,123,135,137,138,139,143,161,162,179,389,"
-    "443,445,465,514,515,587,631,636,853,873,989,990,993,995,1080,1194,1433,1521,"
-    "1883,1900,2049,3128,3306,3389,5060,5061,5353,5432,5672,5900,6379,8080,8443,"
-    "9000,9090,9092,9200,11211,27017)"
-)
+# IANA dynamic/ephemeral port range. A port in this range is a throwaway client
+# port; any other (non-null) port is treated as a service port. This is the sole
+# signal for deciding which side of a flow is the server, and whether a flow is a
+# normal client->server exchange or a bidirectional service-to-service one.
+EPHEMERAL_MIN = 49152
+EPHEMERAL_MAX = 65535
 
-# Pick the "server" port: prefer a well-known port, else the lower port number.
-SERVER_PORT_SQL = f"""
+
+def _is_ephemeral(col: str) -> str:
+    return f"({col} BETWEEN {EPHEMERAL_MIN} AND {EPHEMERAL_MAX})"
+
+
+def _is_service(col: str) -> str:
+    return f"({col} IS NOT NULL AND NOT {_is_ephemeral(col)})"
+
+
+# Per-packet: is the *service* endpoint this packet's source? Drives server_port,
+# reply_port and server_is_a downstream. The cases:
+#   * neither port (non-TCP/UDP)         -> NULL (no service, undirected)
+#   * both ports are service ports       -> service = destination. This is the
+#       bidirectional service case: the reverse-direction packets resolve to the
+#       *other* endpoint, so the flow splits into two directional conversations.
+#   * exactly one is a service port      -> service = that side. Covers a normal
+#       client->server packet (dst is the service) and its server->client reply
+#       (src is the service); both resolve to the same endpoint -> one conversation.
+#   * neither is a service port          -> service = the lower port (LEAST fallback).
+SERVICE_IS_SRC_SQL = f"""
 CASE
   WHEN src_port IS NULL AND dst_port IS NULL THEN NULL
-  WHEN src_port IS NULL THEN dst_port
-  WHEN dst_port IS NULL THEN src_port
-  WHEN dst_port IN {_WELLKNOWN} AND src_port NOT IN {_WELLKNOWN} THEN dst_port
-  WHEN src_port IN {_WELLKNOWN} AND dst_port NOT IN {_WELLKNOWN} THEN src_port
-  ELSE LEAST(src_port, dst_port)
+  WHEN src_port IS NULL THEN FALSE
+  WHEN dst_port IS NULL THEN TRUE
+  WHEN {_is_service('src_port')} AND {_is_service('dst_port')} THEN FALSE
+  WHEN {_is_service('src_port')} THEN TRUE
+  WHEN {_is_service('dst_port')} THEN FALSE
+  ELSE (src_port <= dst_port)
 END
 """

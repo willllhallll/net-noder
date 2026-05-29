@@ -17,6 +17,10 @@ SCRATCH_DIR = Path(
 DB_PATH = Path(os.environ.get("NETNODER_DB", str(DATA_DIR / "netnoder.duckdb"))).resolve()
 # Directory of IP -> given-name CSVs (header: ip,given_name). May hold several files.
 NAMES_DIR = Path(os.environ.get("NETNODER_NAMES", str(DATA_DIR / "names"))).resolve()
+# Reference CSV of port -> service descriptions (header: port,transport,description,...).
+PORTMAP_PATH = Path(
+    os.environ.get("NETNODER_PORTMAP", str(DATA_DIR / "portmap" / "portmap.csv"))
+).resolve()
 
 # Extra subnets (comma-separated CIDRs) to treat as "local" beyond the usual
 # RFC1918 / loopback / link-local ranges, e.g. "10.0.0.0/8,192.0.2.0/24".

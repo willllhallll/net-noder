@@ -60,7 +60,7 @@ export interface Graph {
   meta?: GraphMeta;
 }
 
-// Traffic on one assumed service (proto + server port) within a connection.
+// Traffic toward one service endpoint (proto + server port) within a connection.
 export interface Conversation {
   l4_proto: string;
   server_port: number | null;
@@ -69,26 +69,28 @@ export interface Conversation {
   bytes_a2b: number;
   pkts_b2a: number;
   bytes_b2a: number;
-  client_port_count: number;
+  reply_port_count: number;
   // true: ip_a is the server; false: ip_b; null: no service port (undirected).
   server_is_a: boolean | null;
+  // port_services description for server_port; null -> "No Service Info".
+  service: string | null;
   first_seen: number | null;
   last_seen: number | null;
 }
 
-export interface EphemeralPort {
+export interface ReplyPort {
   port: number;
   pkts: number;
   bytes: number;
 }
 
-export interface EphemeralPorts {
+export interface ReplyPorts {
   l4_proto: string;
   server_port: number;
   cast_type: string;
   total: number;
   truncated: boolean;
-  ports: EphemeralPort[];
+  ports: ReplyPort[];
 }
 
 export interface ConnectionDetail {

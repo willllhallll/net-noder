@@ -5,11 +5,11 @@ import type {
   ConnectionDetail,
   Conversation,
   EdgeConversation,
-  EphemeralPorts,
   Graph,
   GraphMeta,
   LabelMode,
   NodeDetail,
+  ReplyPorts,
   Stats,
 } from "./types";
 import {
@@ -119,7 +119,7 @@ type View =
   | { kind: "hosts" }
   | { kind: "focus"; focus: Focus }
   | { kind: "connection"; conn: ConnectionDetail; origin: Focus | null };
-type ConvPorts = EphemeralPorts | "loading" | null;
+type ConvPorts = ReplyPorts | "loading" | null;
 type SelectedConv = { conv: Conversation; ports: ConvPorts } | null;
 
 export default function App() {
@@ -177,21 +177,26 @@ export default function App() {
     }
   }, []);
 
-  // Open the side drawer for one conversation, lazily loading its ephemeral ports.
+  // Open the side drawer for one conversation, lazily loading its reply ports.
   const openConversation = useCallback(
     async (conn: ConnectionDetail, conv: Conversation) => {
-      if (conv.server_port == null || conv.client_port_count === 0) {
+      if (
+        conv.server_port == null ||
+        conv.server_is_a == null ||
+        conv.reply_port_count === 0
+      ) {
         setSelectedConv({ conv, ports: null });
         return;
       }
       setSelectedConv({ conv, ports: "loading" });
       try {
-        const ports = await api.ephemeralPorts(
+        const ports = await api.replyPorts(
           conn.ip_a,
           conn.ip_b,
           conv.l4_proto,
           conv.server_port,
-          conv.cast_type
+          conv.cast_type,
+          conv.server_is_a
         );
         setSelectedConv((cur) =>
           cur && cur.conv === conv ? { conv, ports } : cur

@@ -1,8 +1,8 @@
 """Pydantic response models (also drive the OpenAPI schema at /docs).
 
 Three-layer model: endpoints (one IP), connections (any traffic between a pair of
-endpoints), and conversations (traffic on a specific service/port within a
-connection, which may fan out to many ephemeral reply ports).
+endpoints), and conversations (traffic toward one service endpoint within a
+connection, whose reply ports may be many ephemeral ports or a single service port).
 """
 from typing import Optional
 
@@ -68,7 +68,7 @@ class NodeDetail(Node):
 
 
 class Conversation(BaseModel):
-    """Traffic on one assumed service (proto + server port) within a connection."""
+    """Traffic toward one service endpoint (proto + server port) within a connection."""
     l4_proto: str
     server_port: Optional[int] = None
     cast_type: str
@@ -76,25 +76,26 @@ class Conversation(BaseModel):
     bytes_a2b: int
     pkts_b2a: int
     bytes_b2a: int
-    client_port_count: int = 0  # distinct ephemeral ports for this conversation
+    reply_port_count: int = 0  # distinct reply ports for this conversation
     server_is_a: Optional[bool] = None  # True: ip_a is the server; False: ip_b; None: no service port
+    service: Optional[str] = None  # port_services description for server_port; None -> "No Service Info"
     first_seen: Optional[float] = None
     last_seen: Optional[float] = None
 
 
-class EphemeralPort(BaseModel):
+class ReplyPort(BaseModel):
     port: int
     pkts: int
     bytes: int
 
 
-class EphemeralPorts(BaseModel):
+class ReplyPorts(BaseModel):
     l4_proto: str
     server_port: int
     cast_type: str
-    total: int           # distinct ephemeral ports overall
+    total: int           # distinct reply ports overall
     truncated: bool      # True if more exist than returned
-    ports: list[EphemeralPort]
+    ports: list[ReplyPort]
 
 
 class ConnectionDetail(BaseModel):

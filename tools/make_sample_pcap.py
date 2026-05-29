@@ -3,12 +3,17 @@
 
 Crafts Ethernet/IPv4 frames in three layers:
   * curated flows covering unicast (TCP+UDP), multicast (mDNS), and broadcast
-    (DHCP) so cast-type classification and rollups can be asserted;
+    (DHCP) so cast-type classification and rollups can be asserted; plus two
+    service-to-service pairs (same service port both sides, and two different
+    service ports) that split into two directional conversations;
   * high-fanout conversations where one client hits a server from many ephemeral
-    ports (beyond the top-50 cap, so the ephemeral-port drill-down + truncation
+    ports (beyond the top-50 cap, so the reply-port drill-down + truncation
     are exercised);
   * ~50 extra endpoints with dummy connections, for a denser, more graph-like
     dataset.
+
+Ephemeral client ports are kept in the IANA dynamic range (49152-65535) so the
+classifier treats them as ephemeral rather than service ports.
 
 Everything is seeded, so re-running produces byte-identical output.
 
@@ -75,7 +80,7 @@ CURATED = [
     (3, LOCAL_A, GW, "93.184.216.34", "192.168.1.10", 6, 443, 51515, 900),
     (2, GW, LOCAL_A, "192.168.1.10", "93.184.216.34", 6, 51516, 443, 480),
     (2, LOCAL_A, GW, "93.184.216.34", "192.168.1.10", 6, 443, 51516, 900),
-    (2, GW, LOCAL_A, "192.168.1.10", "192.168.1.1", 17, 40000, 53, 40),       # DNS
+    (2, GW, LOCAL_A, "192.168.1.10", "192.168.1.1", 17, 50000, 53, 40),       # DNS
     (3, "01:00:5e:00:00:fb", LOCAL_A, "192.168.1.10", "224.0.0.251", 17, 5353, 5353, 60),  # mDNS
     (1, "ff:ff:ff:ff:ff:ff", LOCAL_B, "192.168.1.50", "255.255.255.255", 17, 68, 67, 300), # DHCP
     # A single host pair with many conversations, to exercise multi-port drill-down.
@@ -84,19 +89,30 @@ CURATED = [
     (3, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 6, 50003, 22, 200),    # SSH
     (4, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 17, 50004, 53, 90),    # DNS
     (2, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 17, 50005, 123, 76),   # NTP
+    # Two mail servers relaying SMTP: both sides use service port 25. Splits into
+    # two directional conversations (tcp/25 .30->.31 and tcp/25 .31->.30), each
+    # with a single reply port of 25.
+    (5, UNI, LOCAL_A, "192.168.1.30", "192.168.1.31", 6, 25, 25, 700),
+    (4, UNI, LOCAL_A, "192.168.1.31", "192.168.1.30", 6, 25, 25, 650),
+    # Two endpoints talking on two *different* service ports: .41 serves on 25,
+    # .40 serves on 36. Splits into tcp/25 toward .41 (reply port 36) and tcp/36
+    # toward .40 (reply port 25).
+    (4, UNI, LOCAL_A, "192.168.1.40", "192.168.1.41", 6, 36, 25, 300),
+    (3, UNI, LOCAL_A, "192.168.1.41", "192.168.1.40", 6, 25, 36, 280),
 ]
 
 
 def fanout_flows():
     """Conversations where a client hits a server on one port from many ephemeral
-    ports. 70 ports > the top-50 cap, so client_port_count and ``truncated`` are
-    exercised in the ephemeral-port view."""
+    ports. 70 ports > the top-50 cap, so reply_port_count and ``truncated`` are
+    exercised in the reply-port view. Base ports sit in the IANA dynamic range
+    (49152-65535) so they classify as ephemeral, not service, ports."""
     flows = []
     # (client_ip, server_ip, server_port, base_ephemeral_port, n_ports)
     cases = [
-        ("192.168.1.10", "151.101.1.69", 443, 41000, 70),    # busy HTTPS download
-        ("192.168.1.20", "151.101.1.69", 443, 42000, 64),    # second client, same server
-        ("192.168.1.20", "140.82.112.21", 8443, 43000, 55),  # alt HTTPS port
+        ("192.168.1.10", "151.101.1.69", 443, 49500, 70),    # busy HTTPS download
+        ("192.168.1.20", "151.101.1.69", 443, 50500, 64),    # second client, same server
+        ("192.168.1.20", "140.82.112.21", 8443, 51500, 55),  # alt HTTPS port
     ]
     for client, server, port, base, n in cases:
         for k in range(n):
@@ -131,7 +147,7 @@ def bulk_flows():
     for ci, client in enumerate(clients):
         for hub_ip, port, proto in rng.sample(hubs, k=rng.randint(2, 3)):
             for k in range(rng.randint(1, 4)):  # a few ephemeral ports per conversation
-                eph = 45000 + ci * 20 + (port % 17) + k
+                eph = 49200 + ci * 20 + (port % 17) + k
                 cnt = rng.randint(2, 6)
                 flows.append((cnt, UNI, LOCAL_A, client, hub_ip, proto, eph, port,
                               rng.choice([120, 240, 480])))
