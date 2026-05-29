@@ -1,14 +1,20 @@
 """Graph queries over the aggregated tables. Each takes a DuckDB cursor.
 
 All results are bounded (top-N / neighbours of one node) so the API never returns
-the whole graph.
+the whole graph. Vocabulary: endpoints (one IP), connections (any traffic between a
+pair), conversations (traffic on one assumed service/port within a connection).
 """
 ALLOWED_METRICS = {"bytes", "pkts"}
 _MAX_LIMIT = 2000
-_EDGE_TOP_SERVICES = 3  # services listed inline on each edge before "+N more"
+_EDGE_TOP_CONVS = 3  # conversations listed inline on each edge before "+N more"
 
-# conv row layout shared by the helpers below
-_CONV_COLS = (
+# Defensive ceiling on host-view node count. The initial use case is a single /24
+# (<=256 endpoints) so this never trips there; on a much larger capture we keep the
+# highest-traffic endpoints and warn, since drill-down + search still reach the rest.
+MAX_GRAPH_NODES = 10000
+
+# connection row layout shared by the helpers below
+_CONN_COLS = (
     "id, ip_a, ip_b, pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, first_seen, last_seen"
 )
 # Node columns + the given-name join, applied at query time so names can be edited
@@ -52,65 +58,65 @@ def _fetch_nodes(cur, ips) -> list[dict]:
 
 
 def _edge_extras(cur, ids) -> dict:
-    """Per-conversation dominant cast + top-N services (by bytes) + total count."""
+    """Per-connection dominant cast + top-N conversations (by bytes) + total count."""
     if not ids:
         return {}
     ph = ",".join("?" * len(ids))
 
-    # Dominant cast and how many distinct services the pair has.
+    # Dominant cast and how many distinct conversations the pair has.
     summary = cur.execute(
         f"""
-        SELECT conversation_id,
+        SELECT connection_id,
           CASE WHEN bool_or(cast_type='broadcast') THEN 'broadcast'
                WHEN bool_or(cast_type='multicast') THEN 'multicast'
                ELSE 'unicast' END,
           count(*)
-        FROM services WHERE conversation_id IN ({ph})
-        GROUP BY conversation_id
+        FROM conversations WHERE connection_id IN ({ph})
+        GROUP BY connection_id
         """,
         ids,
     ).fetchall()
-    out = {cid: {"cast": cast, "total": total, "services": []}
+    out = {cid: {"cast": cast, "total": total, "conversations": []}
            for cid, cast, total in summary}
 
-    # Top-N services per conversation, ranked by bytes.
+    # Top-N conversations per connection, ranked by bytes.
     top = cur.execute(
         f"""
-        SELECT conversation_id, l4_proto, server_port, cast_type
+        SELECT connection_id, l4_proto, server_port, cast_type
         FROM (
-          SELECT conversation_id, l4_proto, server_port, cast_type,
-                 row_number() OVER (PARTITION BY conversation_id
-                                    ORDER BY bytes DESC) AS rk
-          FROM services WHERE conversation_id IN ({ph})
-        ) WHERE rk <= {_EDGE_TOP_SERVICES}
-        ORDER BY conversation_id, rk
+          SELECT connection_id, l4_proto, server_port, cast_type,
+                 row_number() OVER (PARTITION BY connection_id
+                                    ORDER BY (bytes_a2b + bytes_b2a) DESC) AS rk
+          FROM conversations WHERE connection_id IN ({ph})
+        ) WHERE rk <= {_EDGE_TOP_CONVS}
+        ORDER BY connection_id, rk
         """,
         ids,
     ).fetchall()
     for cid, proto, port, cast in top:
         if cid in out:
-            out[cid]["services"].append(
+            out[cid]["conversations"].append(
                 {"proto": proto, "port": port, "cast": cast}
             )
     return out
 
 
-def _assemble(cur, conv_rows) -> dict:
-    ids = [r[0] for r in conv_rows]
+def _assemble(cur, conn_rows) -> dict:
+    ids = [r[0] for r in conn_rows]
     extras = _edge_extras(cur, ids)
     ips: set = set()
     edges = []
-    for r in conv_rows:
+    for r in conn_rows:
         cid, ip_a, ip_b = r[0], r[1], r[2]
         ips.add(ip_a)
         ips.add(ip_b)
-        ex = extras.get(cid, {"cast": "unicast", "total": 0, "services": []})
-        services = ex["services"]
+        ex = extras.get(cid, {"cast": "unicast", "total": 0, "conversations": []})
+        convs = ex["conversations"]
         edges.append({
             "id": cid, "source": ip_a, "target": ip_b,
             "pkts": r[3] + r[5], "bytes": r[4] + r[6],
-            "cast": ex["cast"], "services": services,
-            "extra": max(0, ex["total"] - len(services)),
+            "cast": ex["cast"], "conversations": convs,
+            "extra": max(0, ex["total"] - len(convs)),
         })
     return {"nodes": _fetch_nodes(cur, ips), "edges": edges}
 
@@ -120,35 +126,61 @@ def stats(cur) -> dict:
         """
         SELECT
           (SELECT count(*) FROM endpoints),
+          (SELECT count(*) FROM connections),
           (SELECT count(*) FROM conversations),
-          (SELECT count(*) FROM services),
-          (SELECT coalesce(sum(pkts_a2b + pkts_b2a), 0) FROM conversations),
-          (SELECT coalesce(sum(bytes_a2b + bytes_b2a), 0) FROM conversations),
+          (SELECT coalesce(sum(pkts_a2b + pkts_b2a), 0) FROM connections),
+          (SELECT coalesce(sum(bytes_a2b + bytes_b2a), 0) FROM connections),
           (SELECT min(first_seen) FROM endpoints),
           (SELECT max(last_seen) FROM endpoints)
         """
     ).fetchone()
     return {
-        "endpoints": row[0], "conversations": row[1], "services": row[2],
+        "endpoints": row[0], "connections": row[1], "conversations": row[2],
         "total_pkts": row[3], "total_bytes": row[4],
         "first_seen": row[5], "last_seen": row[6],
     }
 
 
-def top_graph(cur, metric: str = "bytes", limit: int = 100) -> dict:
-    metric = _metric(metric)
-    rows = cur.execute(
-        f"SELECT {_CONV_COLS} FROM conversations "
-        f"ORDER BY {_order_expr(metric)} DESC LIMIT ?",
-        [_clamp(limit)],
-    ).fetchall()
-    return _assemble(cur, rows)
+def full_graph(cur, cap: int = MAX_GRAPH_NODES) -> dict:
+    """The whole host graph (all endpoints + connections), bounded by a node cap.
+
+    Under the cap every connection is returned. Over it, only the top `cap`
+    endpoints by bytes are kept (and the connections among them); `meta.capped`
+    flags this so the UI can explain that drill-down/search still reach the rest.
+    """
+    cap = _clamp(cap, hi=MAX_GRAPH_NODES)
+    total = cur.execute("SELECT count(*) FROM endpoints").fetchone()[0]
+
+    if total <= cap:
+        rows = cur.execute(f"SELECT {_CONN_COLS} FROM connections").fetchall()
+    else:
+        top_ips = [
+            r[0]
+            for r in cur.execute(
+                "SELECT ip FROM endpoints ORDER BY total_bytes DESC LIMIT ?", [cap]
+            ).fetchall()
+        ]
+        ph = ",".join("?" * len(top_ips))
+        rows = cur.execute(
+            f"SELECT {_CONN_COLS} FROM connections "
+            f"WHERE ip_a IN ({ph}) AND ip_b IN ({ph})",
+            top_ips + top_ips,
+        ).fetchall()
+
+    g = _assemble(cur, rows)
+    g["meta"] = {
+        "capped": total > cap,
+        "cap": cap,
+        "shown_endpoints": len(g["nodes"]),
+        "total_endpoints": total,
+    }
+    return g
 
 
 def neighbors(cur, ip: str, metric: str = "bytes", limit: int = 50) -> dict:
     metric = _metric(metric)
     rows = cur.execute(
-        f"SELECT {_CONV_COLS} FROM conversations WHERE ip_a=? OR ip_b=? "
+        f"SELECT {_CONN_COLS} FROM connections WHERE ip_a=? OR ip_b=? "
         f"ORDER BY {_order_expr(metric)} DESC LIMIT ?",
         [ip, ip, _clamp(limit)],
     ).fetchall()
@@ -166,16 +198,16 @@ def node_detail(cur, ip: str):
         return None
     d = _node_dict(r)
     d["degree"] = cur.execute(
-        "SELECT count(*) FROM conversations WHERE ip_a=? OR ip_b=?", [ip, ip]
+        "SELECT count(*) FROM connections WHERE ip_a=? OR ip_b=?", [ip, ip]
     ).fetchone()[0]
     return d
 
 
-def conversation(cur, a: str, b: str):
+def connection(cur, a: str, b: str):
     ip_a, ip_b = sorted([a, b])  # matches DuckDB LEAST/GREATEST canonical order
     c = cur.execute(
-        f"SELECT {_CONV_COLS}, na.given_name, nb.given_name "
-        "FROM conversations c "
+        f"SELECT {_CONN_COLS}, na.given_name, nb.given_name "
+        "FROM connections c "
         "LEFT JOIN names na ON na.ip = c.ip_a "
         "LEFT JOIN names nb ON nb.ip = c.ip_b "
         "WHERE c.ip_a=? AND c.ip_b=?",
@@ -183,10 +215,12 @@ def conversation(cur, a: str, b: str):
     ).fetchone()
     if not c:
         return None
-    svc = cur.execute(
-        "SELECT l4_proto, server_port, cast_type, pkts, bytes, "
-        "coalesce(client_port_count, 0) "
-        "FROM services WHERE conversation_id=? ORDER BY bytes DESC",
+    convs = cur.execute(
+        "SELECT l4_proto, server_port, cast_type, "
+        "pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, "
+        "coalesce(client_port_count, 0), server_is_a, first_seen, last_seen "
+        "FROM conversations WHERE connection_id=? "
+        "ORDER BY (bytes_a2b + bytes_b2a) DESC",
         [c[0]],
     ).fetchall()
     return {
@@ -194,34 +228,36 @@ def conversation(cur, a: str, b: str):
         "name_a": c[9], "name_b": c[10],
         "pkts_a2b": c[3], "bytes_a2b": c[4], "pkts_b2a": c[5], "bytes_b2a": c[6],
         "first_seen": c[7], "last_seen": c[8],
-        "services": [
+        "conversations": [
             {"l4_proto": s[0], "server_port": s[1], "cast_type": s[2],
-             "pkts": s[3], "bytes": s[4], "client_port_count": s[5]}
-            for s in svc
+             "pkts_a2b": s[3], "bytes_a2b": s[4], "pkts_b2a": s[5], "bytes_b2a": s[6],
+             "client_port_count": s[7], "server_is_a": s[8],
+             "first_seen": s[9], "last_seen": s[10]}
+            for s in convs
         ],
     }
 
 
 def ephemeral_ports(cur, a: str, b: str, proto: str, server_port: int,
                     cast: str, limit: int = 50):
-    """Top ephemeral/client ports for one service line of a conversation."""
+    """Top ephemeral/client ports for one conversation of a connection."""
     ip_a, ip_b = sorted([a, b])
-    conv = cur.execute(
-        "SELECT id FROM conversations WHERE ip_a=? AND ip_b=?", [ip_a, ip_b]
+    conn = cur.execute(
+        "SELECT id FROM connections WHERE ip_a=? AND ip_b=?", [ip_a, ip_b]
     ).fetchone()
-    if not conv:
+    if not conn:
         return None
-    cid = conv[0]
+    cid = conn[0]
     total = cur.execute(
-        "SELECT coalesce(client_port_count, 0) FROM services "
-        "WHERE conversation_id=? AND l4_proto=? AND server_port=? AND cast_type=?",
+        "SELECT coalesce(client_port_count, 0) FROM conversations "
+        "WHERE connection_id=? AND l4_proto=? AND server_port=? AND cast_type=?",
         [cid, proto, server_port, cast],
     ).fetchone()
     if total is None:
         return None
     rows = cur.execute(
-        "SELECT client_port, pkts, bytes FROM service_ports "
-        "WHERE conversation_id=? AND l4_proto=? AND server_port=? AND cast_type=? "
+        "SELECT client_port, pkts, bytes FROM conversation_ports "
+        "WHERE connection_id=? AND l4_proto=? AND server_port=? AND cast_type=? "
         "ORDER BY bytes DESC LIMIT ?",
         [cid, proto, server_port, cast, _clamp(limit, 500)],
     ).fetchall()
@@ -233,12 +269,18 @@ def ephemeral_ports(cur, a: str, b: str, proto: str, server_port: int,
 
 
 def search(cur, q: str, limit: int = 20) -> list[dict]:
-    like = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    # Match by IP or by name. IPs are matched as a prefix ("192.168" -> that subnet);
+    # hostnames and user-given names as a case-insensitive substring, so "laptop"
+    # finds "Alice Laptop". Endpoints without a given name still match on their IP.
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    ip_like = esc + "%"
+    name_like = f"%{esc}%"
     rows = cur.execute(
         f"SELECT {_NODE_SELECT} FROM {_NODE_FROM} "
-        "WHERE e.ip LIKE ? ESCAPE '\\' OR e.hostname LIKE ? ESCAPE '\\' "
-        "OR n.given_name LIKE ? ESCAPE '\\' "
+        "WHERE e.ip LIKE ? ESCAPE '\\' "
+        "OR e.hostname ILIKE ? ESCAPE '\\' "
+        "OR n.given_name ILIKE ? ESCAPE '\\' "
         "ORDER BY e.total_bytes DESC LIMIT ?",
-        [like, like, like, _clamp(limit, 100)],
+        [ip_like, name_like, name_like, _clamp(limit, 100)],
     ).fetchall()
     return [_node_dict(r) for r in rows]

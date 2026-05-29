@@ -80,7 +80,8 @@ def main(argv=None) -> int:
     con = connect()
 
     if args.reset:
-        for t in ("services", "conversations", "endpoints", "manifest"):
+        for t in ("conversation_ports", "conversations", "connections",
+                  "endpoints", "manifest"):
             con.execute(f"DELETE FROM {t}")
         for shard in config.SCRATCH_DIR.glob("*.parquet"):
             shard.unlink()
@@ -120,9 +121,9 @@ def main(argv=None) -> int:
 
     e, c, s = con.execute(
         "SELECT (SELECT count(*) FROM endpoints), "
-        "(SELECT count(*) FROM conversations), (SELECT count(*) FROM services)"
+        "(SELECT count(*) FROM connections), (SELECT count(*) FROM conversations)"
     ).fetchone()
-    print(f"endpoints={e} conversations={c} services={s}")
+    print(f"endpoints={e} connections={c} conversations={s}")
     print(f"DB: {config.DB_PATH}")
     con.close()
     return 0

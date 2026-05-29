@@ -1,8 +1,7 @@
 import type {
-  ConversationDetail,
+  ConnectionDetail,
   EphemeralPorts,
   Graph,
-  Metric,
   NodeDetail,
   NodeT,
   Stats,
@@ -20,13 +19,12 @@ const enc = encodeURIComponent;
 
 export const api = {
   stats: () => get<Stats>("/api/stats"),
-  top: (metric: Metric, limit: number) =>
-    get<Graph>(`/api/graph/top?metric=${metric}&limit=${limit}`),
+  graph: () => get<Graph>("/api/graph"),
   node: (ip: string) => get<NodeDetail>(`/api/node/${enc(ip)}`),
-  neighbors: (ip: string, metric: Metric, limit: number) =>
-    get<Graph>(`/api/node/${enc(ip)}/neighbors?metric=${metric}&limit=${limit}`),
-  conversation: (a: string, b: string) =>
-    get<ConversationDetail>(`/api/conversation?a=${enc(a)}&b=${enc(b)}`),
+  neighbors: (ip: string, limit: number) =>
+    get<Graph>(`/api/node/${enc(ip)}/neighbors?limit=${limit}`),
+  connection: (a: string, b: string) =>
+    get<ConnectionDetail>(`/api/connection?a=${enc(a)}&b=${enc(b)}`),
   ephemeralPorts: (
     a: string,
     b: string,

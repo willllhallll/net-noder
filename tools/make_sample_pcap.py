@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Write a tiny deterministic classic-pcap file for testing the ingest pipeline.
+"""Write a deterministic classic-pcap file for testing the ingest pipeline.
 
-Crafts Ethernet/IPv4 frames covering unicast (TCP+UDP), multicast (mDNS), and
-broadcast (DHCP) so cast-type classification and service rollups can be asserted.
+Crafts Ethernet/IPv4 frames in three layers:
+  * curated flows covering unicast (TCP+UDP), multicast (mDNS), and broadcast
+    (DHCP) so cast-type classification and rollups can be asserted;
+  * high-fanout conversations where one client hits a server from many ephemeral
+    ports (beyond the top-50 cap, so the ephemeral-port drill-down + truncation
+    are exercised);
+  * ~50 extra endpoints with dummy connections, for a denser, more graph-like
+    dataset.
+
+Everything is seeded, so re-running produces byte-identical output.
 
 Usage: python tools/make_sample_pcap.py [out.pcap]   (default: data/captures/sample.pcap)
 """
+import random
 import socket
 import struct
 import sys
@@ -53,9 +62,12 @@ def frame(eth_dst, eth_src, src, dst, proto, sport, dport, plen) -> bytes:
 LOCAL_A = "02:11:11:11:11:11"
 LOCAL_B = "02:22:22:22:22:22"
 GW = "02:33:33:33:33:33"
+# A generic locally-administered *unicast* MAC for synthetic traffic (even first
+# octet => unicast, so cast classification stays 'unicast').
+UNI = "02:44:44:44:44:44"
 
 # count, eth_dst, eth_src, src_ip, dst_ip, proto, sport, dport, payload_len
-FLOWS = [
+CURATED = [
     (5, GW, LOCAL_A, "192.168.1.10", "93.184.216.34", 6, 51514, 443, 500),    # HTTPS out
     (4, LOCAL_A, GW, "93.184.216.34", "192.168.1.10", 6, 443, 51514, 1400),   # HTTPS in
     # Same service (TCP/443) from two more ephemeral client ports.
@@ -66,13 +78,69 @@ FLOWS = [
     (2, GW, LOCAL_A, "192.168.1.10", "192.168.1.1", 17, 40000, 53, 40),       # DNS
     (3, "01:00:5e:00:00:fb", LOCAL_A, "192.168.1.10", "224.0.0.251", 17, 5353, 5353, 60),  # mDNS
     (1, "ff:ff:ff:ff:ff:ff", LOCAL_B, "192.168.1.50", "255.255.255.255", 17, 68, 67, 300), # DHCP
-    # A single host pair speaking many services, to exercise multi-port edges.
+    # A single host pair with many conversations, to exercise multi-port drill-down.
     (6, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 6, 50001, 443, 1200),  # HTTPS
     (5, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 6, 50002, 80, 800),    # HTTP
     (3, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 6, 50003, 22, 200),    # SSH
     (4, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 17, 50004, 53, 90),    # DNS
     (2, GW, LOCAL_A, "192.168.1.10", "10.0.0.5", 17, 50005, 123, 76),   # NTP
 ]
+
+
+def fanout_flows():
+    """Conversations where a client hits a server on one port from many ephemeral
+    ports. 70 ports > the top-50 cap, so client_port_count and ``truncated`` are
+    exercised in the ephemeral-port view."""
+    flows = []
+    # (client_ip, server_ip, server_port, base_ephemeral_port, n_ports)
+    cases = [
+        ("192.168.1.10", "151.101.1.69", 443, 41000, 70),    # busy HTTPS download
+        ("192.168.1.20", "151.101.1.69", 443, 42000, 64),    # second client, same server
+        ("192.168.1.20", "140.82.112.21", 8443, 43000, 55),  # alt HTTPS port
+    ]
+    for client, server, port, base, n in cases:
+        for k in range(n):
+            eph = base + k
+            # client -> server (request), then server -> client (larger reply).
+            flows.append((1, GW, LOCAL_A, client, server, 6, eph, port, 200 + (k % 5) * 80))
+            flows.append((1, LOCAL_A, GW, server, client, 6, port, eph, 600 + (k % 7) * 120))
+    return flows
+
+
+def bulk_flows():
+    """~50 extra endpoints with dummy connections to a handful of hub servers, for
+    a denser graph. Seeded, so output stays deterministic across runs."""
+    rng = random.Random(1700)
+    # Hub servers the synthetic clients talk to: (ip, server_port, ip_proto).
+    # Public IPs classify as external (orange); RFC1918 as local (blue).
+    hubs = [
+        ("104.16.132.50", 443, 6),   # external web (TLS)
+        ("104.16.132.50", 80, 6),    # external web (HTTP)
+        ("8.8.8.8", 53, 17),         # external DNS
+        ("10.0.0.5", 443, 6),        # internal app server
+        ("10.0.0.6", 3306, 6),       # internal database
+        ("192.168.1.1", 53, 17),     # gateway DNS
+    ]
+    # 50 fresh client endpoints across a few subnets (mix of local and external).
+    clients = (
+        [f"192.168.1.{100 + i}" for i in range(30)]    # local LAN
+        + [f"10.0.1.{1 + i}" for i in range(10)]       # local server VLAN
+        + [f"172.105.10.{20 + i}" for i in range(10)]  # external (public hosting)
+    )
+    flows = []
+    for ci, client in enumerate(clients):
+        for hub_ip, port, proto in rng.sample(hubs, k=rng.randint(2, 3)):
+            for k in range(rng.randint(1, 4)):  # a few ephemeral ports per conversation
+                eph = 45000 + ci * 20 + (port % 17) + k
+                cnt = rng.randint(2, 6)
+                flows.append((cnt, UNI, LOCAL_A, client, hub_ip, proto, eph, port,
+                              rng.choice([120, 240, 480])))
+                flows.append((cnt, LOCAL_A, UNI, hub_ip, client, proto, port, eph,
+                              rng.choice([300, 700, 1400])))
+    return flows
+
+
+FLOWS = CURATED + fanout_flows() + bulk_flows()
 
 
 def main() -> None:

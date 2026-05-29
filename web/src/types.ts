@@ -1,7 +1,7 @@
 export interface Stats {
   endpoints: number;
+  connections: number;
   conversations: number;
-  services: number;
   total_pkts: number;
   total_bytes: number;
   first_seen: number | null;
@@ -26,12 +26,14 @@ export interface NodeDetail extends NodeT {
   degree: number;
 }
 
-export interface EdgeService {
+// Inline chip summarising one conversation on a connection edge.
+export interface EdgeConversation {
   proto: string;
   port: number | null;
   cast: string;
 }
 
+// A connection edge: any traffic between two endpoints.
 export interface EdgeT {
   id: number;
   source: string;
@@ -39,22 +41,39 @@ export interface EdgeT {
   pkts: number;
   bytes: number;
   cast: string;
-  services: EdgeService[];
+  conversations: EdgeConversation[];
   extra: number;
+}
+
+// Host-view truncation info, present only on the full graph response. `capped`
+// is true when the dataset exceeded the node cap and only the top endpoints show.
+export interface GraphMeta {
+  capped: boolean;
+  cap: number;
+  shown_endpoints: number;
+  total_endpoints: number;
 }
 
 export interface Graph {
   nodes: NodeT[];
   edges: EdgeT[];
+  meta?: GraphMeta;
 }
 
-export interface Service {
+// Traffic on one assumed service (proto + server port) within a connection.
+export interface Conversation {
   l4_proto: string;
   server_port: number | null;
   cast_type: string;
-  pkts: number;
-  bytes: number;
+  pkts_a2b: number;
+  bytes_a2b: number;
+  pkts_b2a: number;
+  bytes_b2a: number;
   client_port_count: number;
+  // true: ip_a is the server; false: ip_b; null: no service port (undirected).
+  server_is_a: boolean | null;
+  first_seen: number | null;
+  last_seen: number | null;
 }
 
 export interface EphemeralPort {
@@ -72,7 +91,7 @@ export interface EphemeralPorts {
   ports: EphemeralPort[];
 }
 
-export interface ConversationDetail {
+export interface ConnectionDetail {
   id: number;
   ip_a: string;
   ip_b: string;
@@ -84,7 +103,5 @@ export interface ConversationDetail {
   bytes_b2a: number;
   first_seen: number | null;
   last_seen: number | null;
-  services: Service[];
+  conversations: Conversation[];
 }
-
-export type Metric = "bytes" | "pkts";

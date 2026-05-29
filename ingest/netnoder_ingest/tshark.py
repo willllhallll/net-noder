@@ -1,6 +1,6 @@
 """Thin wrapper around the tshark CLI to dump the fields we care about as TSV.
 
-We extract only the columns needed to build IP conversations + service/cast detail,
+We extract only the columns needed to build connections + conversation/cast detail,
 disable name resolution (-n) for speed, and take the first occurrence of each field
 (-E occurrence=f) so tunnelled/multi-layer packets stay one row per packet.
 """

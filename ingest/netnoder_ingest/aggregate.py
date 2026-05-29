@@ -1,4 +1,4 @@
-"""Aggregate all parquet shards into the endpoints/conversations/services tables.
+"""Aggregate all parquet shards into the endpoints/connections/conversations tables.
 
 DuckDB does the heavy GROUP BY out-of-core (spilling to ``temp_directory``), so this
 stays within the RAM budget even for hundreds of millions of packets. Tables are
@@ -11,8 +11,9 @@ import duckdb
 from . import config
 from .transform import CAST_SQL, PROTO_SQL, SERVER_PORT_SQL
 
-# Max ephemeral/client ports retained per service row (top-N by bytes). Bounds the
-# size of service_ports; the per-service total is still recorded on services.
+# Max ephemeral/client ports retained per conversation row (top-N by bytes). Bounds
+# the size of conversation_ports; the per-conversation total is still recorded on
+# conversations (client_port_count).
 _EPHEMERAL_KEEP = 50
 
 
@@ -27,8 +28,12 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
     con.execute(f"SET threads={max(1, threads)}")
     con.execute(f"SET temp_directory='{config.DATA_DIR}'")
 
-    # Outer query derives client_port (the side that isn't the server port) from the
-    # inner query's computed server_port.
+    # Outer query derives, from the inner query's computed server_port:
+    #   client_port    - the side that isn't the server port.
+    #   server_is_a_row - whether ip_a owns the server port on this packet. The side
+    #                     that used server_port is the server; that side is ip_a iff
+    #                     it was the source (a_is_src) for a src match, else iff it
+    #                     was the destination (NOT a_is_src) for a dst match.
     con.execute(f"""
         CREATE OR REPLACE TEMP VIEW flows AS
         SELECT *,
@@ -36,7 +41,12 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
                  WHEN src_port = server_port THEN dst_port
                  WHEN dst_port = server_port THEN src_port
                  ELSE NULLIF(GREATEST(src_port, dst_port), server_port)
-            END AS client_port
+            END AS client_port,
+            CASE WHEN server_port IS NULL THEN NULL
+                 WHEN src_port = server_port THEN a_is_src
+                 WHEN dst_port = server_port THEN NOT a_is_src
+                 ELSE NULL
+            END AS server_is_a_row
         FROM (
             SELECT
                 src_ip, dst_ip, ts, len, src_port, dst_port,
@@ -53,13 +63,13 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
 
     con.execute("BEGIN")
     try:
-        con.execute("DELETE FROM service_ports")
-        con.execute("DELETE FROM services")
+        con.execute("DELETE FROM conversation_ports")
         con.execute("DELETE FROM conversations")
+        con.execute("DELETE FROM connections")
         con.execute("DELETE FROM endpoints")
 
         con.execute("""
-            INSERT INTO conversations
+            INSERT INTO connections
             SELECT
                 row_number() OVER (ORDER BY (bytes_a2b + bytes_b2a) DESC) AS id,
                 ip_a, ip_b, pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, first_seen, last_seen
@@ -74,40 +84,52 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
             )
         """)
 
-        # Finest-grain breakdown (per ephemeral/client port), materialised once so
-        # the two rollups below don't rescan the parquet.
-        con.execute("DROP TABLE IF EXISTS svc_full")
+        # Per-conversation directional rollup, read straight from flows so the
+        # client->server direction survives. server_is_a is resolved by majority
+        # bytes so a rare per-packet flip can't mislabel the server side.
         con.execute("""
-            CREATE TEMP TABLE svc_full AS
+            INSERT INTO conversations
+            SELECT c.id, f.proto, f.server_port, f.cast_type,
+                   SUM(CASE WHEN f.a_is_src THEN 1   ELSE 0 END) AS pkts_a2b,
+                   SUM(CASE WHEN f.a_is_src THEN f.len ELSE 0 END) AS bytes_a2b,
+                   SUM(CASE WHEN f.a_is_src THEN 0   ELSE 1 END) AS pkts_b2a,
+                   SUM(CASE WHEN f.a_is_src THEN 0 ELSE f.len END) AS bytes_b2a,
+                   COUNT(DISTINCT f.client_port) AS client_port_count,
+                   CASE WHEN f.server_port IS NULL THEN NULL
+                        ELSE SUM(CASE WHEN f.server_is_a_row THEN f.len ELSE 0 END)
+                           >= SUM(CASE WHEN f.server_is_a_row IS NOT NULL
+                                            AND NOT f.server_is_a_row THEN f.len ELSE 0 END)
+                   END AS server_is_a,
+                   MIN(f.ts) AS first_seen, MAX(f.ts) AS last_seen
+            FROM flows f
+            JOIN connections c USING (ip_a, ip_b)
+            GROUP BY c.id, f.proto, f.server_port, f.cast_type
+        """)
+
+        # Finest-grain breakdown (per ephemeral/client port), materialised once for
+        # the top-N ports rollup so it doesn't rescan the parquet.
+        con.execute("DROP TABLE IF EXISTS conv_full")
+        con.execute("""
+            CREATE TEMP TABLE conv_full AS
             SELECT ip_a, ip_b, proto, server_port, cast_type, client_port,
                    COUNT(*) AS pkts, SUM(len) AS bytes
             FROM flows
             GROUP BY ip_a, ip_b, proto, server_port, cast_type, client_port
         """)
 
-        # Per-service totals + count of distinct ephemeral ports.
-        con.execute("""
-            INSERT INTO services
-            SELECT c.id, f.proto, f.server_port, f.cast_type,
-                   SUM(f.pkts), SUM(f.bytes), COUNT(f.client_port)
-            FROM svc_full f
-            JOIN conversations c USING (ip_a, ip_b)
-            GROUP BY c.id, f.proto, f.server_port, f.cast_type
-        """)
-
-        # Top-N ephemeral ports per service (by bytes).
+        # Top-N ephemeral ports per conversation (by bytes).
         con.execute(f"""
-            INSERT INTO service_ports
+            INSERT INTO conversation_ports
             SELECT c.id, f.proto, f.server_port, f.cast_type, f.client_port,
                    f.pkts, f.bytes
             FROM (
                 SELECT *, row_number() OVER (
                            PARTITION BY ip_a, ip_b, proto, server_port, cast_type
                            ORDER BY bytes DESC) AS rk
-                FROM svc_full
+                FROM conv_full
                 WHERE client_port IS NOT NULL
             ) f
-            JOIN conversations c USING (ip_a, ip_b)
+            JOIN connections c USING (ip_a, ip_b)
             WHERE f.rk <= {_EPHEMERAL_KEEP}
         """)
 

@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db, queries
 from .models import (
-    ConversationDetail,
+    ConnectionDetail,
     EphemeralPorts,
     Graph,
     Node,
@@ -55,9 +55,11 @@ def get_stats():
     return queries.stats(_cursor())
 
 
-@app.get("/api/graph/top", response_model=Graph)
-def get_top(metric: str = Query("bytes"), limit: int = Query(100, ge=1, le=2000)):
-    return queries.top_graph(_cursor(), metric, limit)
+@app.get("/api/graph", response_model=Graph)
+def get_graph(
+    cap: int = Query(queries.MAX_GRAPH_NODES, ge=1, le=queries.MAX_GRAPH_NODES),
+):
+    return queries.full_graph(_cursor(), cap)
 
 
 @app.get("/api/node/{ip}", response_model=NodeDetail)
@@ -75,11 +77,11 @@ def get_neighbors(
     return queries.neighbors(_cursor(), ip, metric, limit)
 
 
-@app.get("/api/conversation", response_model=ConversationDetail)
-def get_conversation(a: str, b: str):
-    d = queries.conversation(_cursor(), a, b)
+@app.get("/api/connection", response_model=ConnectionDetail)
+def get_connection(a: str, b: str):
+    d = queries.connection(_cursor(), a, b)
     if d is None:
-        raise HTTPException(404, detail=f"No conversation {a} <-> {b}")
+        raise HTTPException(404, detail=f"No connection {a} <-> {b}")
     return d
 
 
@@ -94,7 +96,7 @@ def get_conversation_ports(
 ):
     d = queries.ephemeral_ports(_cursor(), a, b, proto, server_port, cast, limit)
     if d is None:
-        raise HTTPException(404, detail="No such service line")
+        raise HTTPException(404, detail="No such conversation")
     return d
 
 

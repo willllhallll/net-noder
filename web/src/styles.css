@@ -99,22 +99,6 @@ input,
   width: 200px;
 }
 
-.reset-btn {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.reset-btn:hover {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
 .search-results {
   position: absolute;
   top: 100%;
@@ -166,6 +150,25 @@ input,
   font-size: 12px;
 }
 
+/* Top-center overlay naming the current view (endpoint / connection); hidden in
+   the unfiltered host view. Purely informational — never intercepts graph clicks. */
+.view-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20; /* above the canvas, below drawer (30) / modal (60) */
+  pointer-events: none;
+  background: rgba(18, 24, 38, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
 .legend-title {
   color: var(--muted);
   margin-bottom: 6px;
@@ -206,78 +209,48 @@ input,
   color: var(--muted);
 }
 
-/* Modal */
+/* Centered modal (cap notice) + the drawer back/exit button share .modal-close */
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  z-index: 60;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 50;
+  background: rgba(3, 6, 12, 0.6);
 }
 
 .modal {
   position: relative;
+  width: min(440px, calc(100vw - 32px));
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 20px 22px;
-  min-width: 360px;
-  max-width: 560px;
-  max-height: 80vh;
-  overflow: auto;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  padding: 22px 24px;
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.5);
 }
 
 .modal h2 {
-  margin: 0 0 10px;
+  margin: 0 28px 12px 0;
   font-size: 17px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: ui-monospace, monospace;
 }
 
-.modal-sub {
-  margin: -6px 0 12px;
-  font-family: ui-monospace, monospace;
+.modal p {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.modal-btn {
+  margin-top: 4px;
+  padding: 7px 16px;
+  background: var(--accent);
+  color: #0b0f17;
+  border: none;
+  border-radius: 7px;
   font-size: 13px;
-}
-
-/* Conversation modal title: two hosts (name over IP) joined by an arrow */
-.conv-title {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 0 28px 14px 0;
-  flex-wrap: wrap;
-}
-
-.conv-host {
-  min-width: 0;
-}
-
-.conv-host-name {
-  font-size: 16px;
   font-weight: 600;
-}
-
-.conv-host-ip {
-  font-family: ui-monospace, monospace;
-  font-size: 12px;
-}
-
-.conv-sep {
-  font-size: 18px;
-}
-
-.modal h3 {
-  margin: 16px 0 6px;
-  font-size: 13px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+  cursor: pointer;
 }
 
 .modal-close {
@@ -306,8 +279,7 @@ input,
   font-size: 11px;
 }
 
-table.kv,
-table.services {
+table.kv {
   width: 100%;
   border-collapse: collapse;
 }
@@ -322,58 +294,7 @@ table.kv td:first-child {
   white-space: nowrap;
 }
 
-table.services th,
-table.services td {
-  text-align: left;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
-}
-
-table.services th {
-  color: var(--muted);
-  font-weight: 600;
-}
-
-table.services td:first-child {
-  font-family: ui-monospace, monospace;
-}
-
-.btn {
-  cursor: pointer;
-  margin-top: 14px;
-}
-
-.btn:hover {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.row-gap {
-  display: flex;
-  gap: 10px;
-}
-
-/* Ephemeral port drill-down */
-.link-btn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--accent);
-  border-radius: 5px;
-  padding: 2px 8px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.link-btn:hover {
-  background: var(--panel-2);
-}
-
-.ephemeral-row > td {
-  background: #0d1320;
-  padding: 8px 10px;
-}
-
+/* Ephemeral reply ports */
 .ephemeral-head {
   margin-bottom: 6px;
   font-size: 11px;
@@ -400,4 +321,55 @@ table.services td:first-child {
 .chip-sub {
   color: var(--muted);
   font-size: 10px;
+}
+
+/* Detail drawer (right side): endpoint focus + connection drill-down */
+.conv-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  z-index: 30;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 18px 20px;
+  overflow: auto;
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.4);
+}
+
+.conv-drawer h2 {
+  margin: 0 28px 10px 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: ui-monospace, monospace;
+}
+
+.conv-drawer h3 {
+  margin: 16px 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.conv-dir {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.conv-arrow {
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.conv-role-server {
+  font-weight: 600;
 }

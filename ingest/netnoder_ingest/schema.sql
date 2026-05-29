@@ -1,5 +1,11 @@
 -- Aggregated tables served to the web app. Built by aggregate.py.
 -- All packet-level data is discarded after aggregation; only rollups live here.
+--
+-- The three-layer model:
+--   endpoints     - a device with one IP address.
+--   connections   - any traffic between two endpoints (the IP-pair).
+--   conversations - traffic on a specific service/port within a connection, which
+--                   may fan out to many ephemeral reply ports.
 
 CREATE TABLE IF NOT EXISTS endpoints (
     ip          VARCHAR PRIMARY KEY,
@@ -12,7 +18,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     hostname    VARCHAR
 );
 
-CREATE TABLE IF NOT EXISTS conversations (
+CREATE TABLE IF NOT EXISTS connections (
     id         BIGINT PRIMARY KEY,
     ip_a       VARCHAR,  -- canonical: ip_a <= ip_b (lexicographic)
     ip_b       VARCHAR,
@@ -24,28 +30,33 @@ CREATE TABLE IF NOT EXISTS conversations (
     last_seen  DOUBLE
 );
 
-CREATE TABLE IF NOT EXISTS services (
-    conversation_id   BIGINT,
+-- One row per (connection, l4_proto, server_port, cast_type): traffic on a single
+-- assumed service. Directional counts + server_is_a give the client->server arrow.
+CREATE TABLE IF NOT EXISTS conversations (
+    connection_id     BIGINT,
     l4_proto          VARCHAR,
     server_port       INTEGER,  -- NULL for non-TCP/UDP
     cast_type         VARCHAR,  -- 'unicast' | 'multicast' | 'broadcast'
-    pkts              BIGINT,
-    bytes             BIGINT,
-    client_port_count BIGINT    -- distinct ephemeral ports seen for this service
+    pkts_a2b          BIGINT,
+    bytes_a2b         BIGINT,
+    pkts_b2a          BIGINT,
+    bytes_b2a         BIGINT,
+    client_port_count BIGINT,   -- distinct ephemeral ports seen for this conversation
+    server_is_a       BOOLEAN,  -- TRUE: ip_a owns server_port; FALSE: ip_b; NULL: no service port
+    first_seen        DOUBLE,   -- epoch seconds
+    last_seen         DOUBLE
 );
--- Migration for DBs created before client_port_count existed.
-ALTER TABLE services ADD COLUMN IF NOT EXISTS client_port_count BIGINT;
 
--- Bounded per-service breakdown of ephemeral/client ports (top-N by bytes).
--- Joins back to a `services` row via (conversation_id, l4_proto, server_port, cast_type).
-CREATE TABLE IF NOT EXISTS service_ports (
-    conversation_id BIGINT,
-    l4_proto        VARCHAR,
-    server_port     INTEGER,
-    cast_type       VARCHAR,
-    client_port     INTEGER,
-    pkts            BIGINT,
-    bytes           BIGINT
+-- Bounded per-conversation breakdown of ephemeral/client ports (top-N by bytes).
+-- Joins back to a `conversations` row via (connection_id, l4_proto, server_port, cast_type).
+CREATE TABLE IF NOT EXISTS conversation_ports (
+    connection_id BIGINT,
+    l4_proto      VARCHAR,
+    server_port   INTEGER,
+    cast_type     VARCHAR,
+    client_port   INTEGER,
+    pkts          BIGINT,
+    bytes         BIGINT
 );
 
 -- User-curated IP -> friendly name mapping. Independent of the aggregation tables
@@ -66,7 +77,7 @@ CREATE TABLE IF NOT EXISTS manifest (
     ingested_at TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_conv_a ON conversations(ip_a);
-CREATE INDEX IF NOT EXISTS idx_conv_b ON conversations(ip_b);
-CREATE INDEX IF NOT EXISTS idx_svc_conv ON services(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_svcports_conv ON service_ports(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_conn_a ON connections(ip_a);
+CREATE INDEX IF NOT EXISTS idx_conn_b ON connections(ip_b);
+CREATE INDEX IF NOT EXISTS idx_conv_conn ON conversations(connection_id);
+CREATE INDEX IF NOT EXISTS idx_convports_conn ON conversation_ports(connection_id);

@@ -1,8 +1,10 @@
 # net-noder
 
 Ingest raw `tcpdump`/Wireshark capture files (`.pcap` / `.pcapng`) and explore the
-network as an interactive graph: circles are IP endpoints, lines are conversations,
-and clicking reveals the ports, protocols, and uni/multi/broadcast breakdown.
+network as an interactive graph: circles are IP **endpoints**, lines are
+**connections** (any traffic between a pair). Click a connection to drill into its
+**conversations** (per service/port, with a client → server arrow), then click a
+conversation to see its ephemeral reply ports and uni/multi/broadcast breakdown.
 
 Built for large captures (100GB+): packets are **aggregated on ingest** into an
 embedded DuckDB store, and the web app only ever fetches **small, filtered
@@ -12,7 +14,7 @@ packets and memory stays bounded.
 ## Architecture
 
 ```
-.pcap files ──tshark──> parquet shards ──DuckDB GROUP BY──> endpoints / conversations / services
+.pcap files ──tshark──> parquet shards ──DuckDB GROUP BY──> endpoints / connections / conversations
                                                                       │
                                               FastAPI (bounded queries) ── React + Cytoscape.js UI
 ```
@@ -68,14 +70,19 @@ manually outside the container, run that script.
 
 ## Data model
 
-| table           | meaning                                                            |
-| --------------- | ----------------------------------------------------------------- |
-| `endpoints`     | one row per IP (node): totals, first/last seen, local?, kind      |
-| `conversations` | one row per IP pair (edge): per-direction packet/byte counts      |
-| `services`      | per conversation: protocol, server port, cast type, packets/bytes |
-| `service_ports` | bounded top-N ephemeral/client ports per service                  |
-| `names`         | user-curated IP → given name (independent of captures)            |
-| `manifest`      | ingest bookkeeping for resumable runs                             |
+| table                | meaning                                                                          |
+| -------------------- | -------------------------------------------------------------------------------- |
+| `endpoints`          | one row per IP (node): totals, first/last seen, local?, kind                     |
+| `connections`        | one row per IP pair (edge): per-direction packet/byte counts                     |
+| `conversations`      | per connection: protocol, server port, cast type, per-direction counts, server side |
+| `conversation_ports` | bounded top-N ephemeral/client ports per conversation                            |
+| `names`              | user-curated IP → given name (independent of captures)                           |
+| `manifest`           | ingest bookkeeping for resumable runs                                            |
+
+The server picks the **server side** of each conversation with a heuristic
+(`transform.py`): a well-known/registered port wins, else the lower port number.
+That gives every conversation a direction (client → server) and identifies which
+endpoint owns the service port (`conversations.server_is_a`).
 
 Cast type is derived per packet from the destination (L2 group/broadcast bit, with
 IP-range fallbacks for L3-only captures). "Local" uses RFC1918/loopback/link-local
