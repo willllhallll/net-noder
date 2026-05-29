@@ -146,13 +146,8 @@ function ReplyList({ data }: { data: ReplyPorts }) {
       </div>
       <div className="chips">
         {data.ports.map((p) => (
-          <span
-            className="chip"
-            key={p.port}
-            title={`${fmtNum(p.pkts)} pkts · ${fmtBytes(p.bytes)}`}
-          >
+          <span className="chip" key={p.port} title={`${fmtNum(p.pkts)} pkts`}>
             {p.port}
-            <span className="chip-sub">{fmtBytes(p.bytes)}</span>
           </span>
         ))}
       </div>

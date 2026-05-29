@@ -8,6 +8,16 @@ ALLOWED_METRICS = {"bytes", "pkts"}
 _MAX_LIMIT = 2000
 _EDGE_TOP_CONVS = 3  # conversations listed inline on each edge before "+N more"
 
+# IANA dynamic/ephemeral port range. Must stay in sync with
+# netnoder_ingest.transform.EPHEMERAL_{MIN,MAX}: a reply port outside this range is a
+# real service port, meaning the replying side is itself a server. Such a
+# bidirectional service-to-service conversation is stored as a single canonical row
+# (keyed on the lower port) but surfaced to the UI as two arrows -- the canonical one
+# plus a role-flipped "mirror" keyed on the peer's (higher) service port. See
+# _mirror_conversations / reply_ports.
+EPHEMERAL_MIN = 49152
+EPHEMERAL_MAX = 65535
+
 # Defensive ceiling on host-view node count. The initial use case is a single /24
 # (<=256 endpoints) so this never trips there; on a much larger capture we keep the
 # highest-traffic endpoints and warn, since drill-down + search still reach the rest.
@@ -230,25 +240,95 @@ def connection(cur, a: str, b: str):
         "ORDER BY (cv.bytes_a2b + cv.bytes_b2a) DESC",
         [c[0]],
     ).fetchall()
+    conversations = [
+        {"l4_proto": s[0], "server_port": s[1], "cast_type": s[2],
+         "pkts_a2b": s[3], "bytes_a2b": s[4], "pkts_b2a": s[5], "bytes_b2a": s[6],
+         "reply_port_count": s[7], "server_is_a": s[8],
+         "first_seen": s[9], "last_seen": s[10], "service": s[11]}
+        for s in convs
+    ]
+    # A conversation whose reply side is itself on a service port is a bidirectional
+    # service-to-service flow: surface its reverse view as an extra arrow (same bytes,
+    # client/server flipped, keyed on the peer's port) without duplicating stored rows.
+    conversations += _mirror_conversations(cur, c[0], convs)
+    conversations.sort(key=lambda x: x["bytes_a2b"] + x["bytes_b2a"], reverse=True)
     return {
         "id": c[0], "ip_a": c[1], "ip_b": c[2],
         "name_a": c[9], "name_b": c[10],
         "pkts_a2b": c[3], "bytes_a2b": c[4], "pkts_b2a": c[5], "bytes_b2a": c[6],
         "first_seen": c[7], "last_seen": c[8],
-        "conversations": [
-            {"l4_proto": s[0], "server_port": s[1], "cast_type": s[2],
-             "pkts_a2b": s[3], "bytes_a2b": s[4], "pkts_b2a": s[5], "bytes_b2a": s[6],
-             "reply_port_count": s[7], "server_is_a": s[8],
-             "first_seen": s[9], "last_seen": s[10], "service": s[11]}
-            for s in convs
-        ],
+        "conversations": conversations,
     }
+
+
+def _service_descr(cur, proto: str, port: int):
+    """port_services description for (port, proto), joined at query time like names."""
+    r = cur.execute(
+        "SELECT nullif(description, '') FROM port_services "
+        "WHERE port=? AND transport=lower(?)",
+        [port, proto],
+    ).fetchone()
+    return r[0] if r else None
+
+
+def _mirror_conversations(cur, cid: int, canonical_rows) -> list[dict]:
+    """Reverse-view conversations for bidirectional service-to-service flows.
+
+    For each non-ephemeral reply port Q of a stored (canonical) conversation, emit one
+    conversation keyed on Q with the server role flipped to Q's owner. The canonical
+    server_port(s) that talked to Q become Q's reply port(s). Counts come straight from
+    the directional conversation_ports rows, so no packet data is re-read or duplicated.
+    """
+    rows = cur.execute(
+        "SELECT l4_proto, server_port, cast_type, server_is_a, reply_port, "
+        "pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a "
+        "FROM conversation_ports "
+        "WHERE connection_id=? AND reply_port IS NOT NULL "
+        "AND reply_port NOT BETWEEN ? AND ?",
+        [cid, EPHEMERAL_MIN, EPHEMERAL_MAX],
+    ).fetchall()
+    if not rows:
+        return []
+
+    # first/last seen per canonical conversation, to carry onto its mirror(s).
+    times = {(r[0], r[1], r[2], r[8]): (r[9], r[10]) for r in canonical_rows}
+
+    groups: dict = {}
+    for proto, sport, cast, sis_a, qport, pa, ba, pb, bb in rows:
+        # mirror server = Q's owner = the peer of the canonical server -> flip is_a.
+        key = (proto, qport, cast, None if sis_a is None else not sis_a)
+        g = groups.setdefault(
+            key, {"pa": 0, "ba": 0, "pb": 0, "bb": 0, "replies": set(),
+                  "fs": None, "ls": None},
+        )
+        g["pa"] += pa; g["ba"] += ba; g["pb"] += pb; g["bb"] += bb
+        g["replies"].add(sport)  # canonical server_port is the mirror's reply port
+        t = times.get((proto, sport, cast, sis_a))
+        if t:
+            fs, ls = t
+            g["fs"] = fs if g["fs"] is None else min(g["fs"], fs)
+            g["ls"] = ls if g["ls"] is None else max(g["ls"], ls)
+
+    return [
+        {"l4_proto": proto, "server_port": qport, "cast_type": cast,
+         "pkts_a2b": g["pa"], "bytes_a2b": g["ba"],
+         "pkts_b2a": g["pb"], "bytes_b2a": g["bb"],
+         "reply_port_count": len(g["replies"]), "server_is_a": mis_a,
+         "first_seen": g["fs"], "last_seen": g["ls"],
+         "service": _service_descr(cur, proto, qport)}
+        for (proto, qport, cast, mis_a), g in groups.items()
+    ]
 
 
 def reply_ports(cur, a: str, b: str, proto: str, server_port: int,
                 cast: str, server_is_a: bool, limit: int = 50):
     """Top reply ports for one conversation of a connection. server_is_a selects
-    which side owns server_port, disambiguating two rows that share a server port."""
+    which side owns server_port, disambiguating two rows that share a server port.
+
+    Handles both a stored (canonical) conversation and a derived mirror: a mirror has
+    no conversations row, so its reply ports are the canonical server_port(s) that
+    talked to this (peer service) port -- looked up with the orientation flipped back.
+    """
     ip_a, ip_b = sorted([a, b])
     conn = cur.execute(
         "SELECT id FROM connections WHERE ip_a=? AND ip_b=?", [ip_a, ip_b]
@@ -256,25 +336,43 @@ def reply_ports(cur, a: str, b: str, proto: str, server_port: int,
     if not conn:
         return None
     cid = conn[0]
-    total = cur.execute(
+    lim = _clamp(limit, 500)
+
+    canonical = cur.execute(
         "SELECT coalesce(reply_port_count, 0) FROM conversations "
         "WHERE connection_id=? AND l4_proto=? AND server_port=? AND cast_type=? "
         "AND server_is_a=?",
         [cid, proto, server_port, cast, server_is_a],
     ).fetchone()
-    if total is None:
-        return None
+
+    if canonical is not None:
+        # reply ports recorded directly against this conversation; reply_port_count is
+        # the true distinct total (conversation_ports keeps only the top-N by bytes).
+        port_expr, where, params = "reply_port", "server_port=? AND server_is_a=?", \
+            [server_port, server_is_a]
+        total = canonical[0]
+    else:
+        # mirror: find conversation_ports whose reply_port is this server_port, owned
+        # by the peer (server_is_a flipped). Their server_port is the mirror's reply.
+        port_expr, where, params = "server_port", "reply_port=? AND server_is_a=?", \
+            [server_port, not server_is_a]
+        total = None  # filled from the row count below
+
     rows = cur.execute(
-        "SELECT reply_port, pkts, bytes FROM conversation_ports "
-        "WHERE connection_id=? AND l4_proto=? AND server_port=? AND cast_type=? "
-        "AND server_is_a=? "
-        "ORDER BY bytes DESC LIMIT ?",
-        [cid, proto, server_port, cast, server_is_a, _clamp(limit, 500)],
+        f"SELECT {port_expr}, pkts_a2b + pkts_b2a, bytes_a2b + bytes_b2a "
+        "FROM conversation_ports "
+        f"WHERE connection_id=? AND l4_proto=? AND cast_type=? AND {where} "
+        "ORDER BY (bytes_a2b + bytes_b2a) DESC LIMIT ?",
+        [cid, proto, cast, *params, lim],
     ).fetchall()
+    if total is None:  # mirror
+        if not rows:
+            return None
+        total = len(rows)
     ports = [{"port": r[0], "pkts": r[1], "bytes": r[2]} for r in rows]
     return {
         "l4_proto": proto, "server_port": server_port, "cast_type": cast,
-        "total": total[0], "truncated": total[0] > len(ports), "ports": ports,
+        "total": total, "truncated": total > len(ports), "ports": ports,
     }
 
 

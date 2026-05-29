@@ -96,7 +96,7 @@ input,
 }
 
 .search input {
-  width: 200px;
+  width: 300px;
 }
 
 .search-results {
@@ -132,6 +132,7 @@ input,
   position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .graph {
@@ -316,11 +317,6 @@ table.kv td:first-child {
   padding: 2px 8px;
   font-family: ui-monospace, monospace;
   font-size: 12px;
-}
-
-.chip-sub {
-  color: var(--muted);
-  font-size: 10px;
 }
 
 /* Detail drawer (right side): endpoint focus + connection drill-down */

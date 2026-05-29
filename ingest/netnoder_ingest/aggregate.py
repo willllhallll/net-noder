@@ -108,21 +108,24 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
         con.execute("""
             CREATE TEMP TABLE conv_full AS
             SELECT ip_a, ip_b, proto, server_port, cast_type, server_is_a_row, reply_port,
-                   COUNT(*) AS pkts, SUM(len) AS bytes
+                   SUM(CASE WHEN a_is_src THEN 1   ELSE 0 END) AS pkts_a2b,
+                   SUM(CASE WHEN a_is_src THEN len ELSE 0 END) AS bytes_a2b,
+                   SUM(CASE WHEN a_is_src THEN 0   ELSE 1 END) AS pkts_b2a,
+                   SUM(CASE WHEN a_is_src THEN 0 ELSE len END) AS bytes_b2a
             FROM flows
             GROUP BY ip_a, ip_b, proto, server_port, cast_type, server_is_a_row, reply_port
         """)
 
-        # Top-N reply ports per conversation (by bytes).
+        # Top-N reply ports per conversation (by total bytes).
         con.execute(f"""
             INSERT INTO conversation_ports
             SELECT c.id, f.proto, f.server_port, f.cast_type, f.server_is_a_row,
-                   f.reply_port, f.pkts, f.bytes
+                   f.reply_port, f.pkts_a2b, f.bytes_a2b, f.pkts_b2a, f.bytes_b2a
             FROM (
                 SELECT *, row_number() OVER (
                            PARTITION BY ip_a, ip_b, proto, server_port, cast_type,
                                         server_is_a_row
-                           ORDER BY bytes DESC) AS rk
+                           ORDER BY (bytes_a2b + bytes_b2a) DESC) AS rk
                 FROM conv_full
                 WHERE reply_port IS NOT NULL
             ) f

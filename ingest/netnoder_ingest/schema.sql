@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS conversations (
 -- Bounded per-conversation breakdown of reply ports (top-N by bytes). Joins back to
 -- a `conversations` row via (connection_id, l4_proto, server_port, cast_type,
 -- server_is_a) -- server_is_a is needed because two rows may share server_port.
+-- Byte/packet counts are directional (a2b/b2a, same ip_a<=ip_b orientation as
+-- connections) so a non-ephemeral reply port can be re-presented as a role-flipped
+-- "mirror" conversation by the API without re-touching the raw packets.
 CREATE TABLE IF NOT EXISTS conversation_ports (
     connection_id BIGINT,
     l4_proto      VARCHAR,
@@ -59,8 +62,10 @@ CREATE TABLE IF NOT EXISTS conversation_ports (
     cast_type     VARCHAR,
     server_is_a   BOOLEAN,
     reply_port    INTEGER,
-    pkts          BIGINT,
-    bytes         BIGINT
+    pkts_a2b      BIGINT,
+    bytes_a2b     BIGINT,
+    pkts_b2a      BIGINT,
+    bytes_b2a     BIGINT
 );
 
 -- User-curated IP -> friendly name mapping. Independent of the aggregation tables
