@@ -19,18 +19,24 @@ export function fmtTime(t: number | null): string {
   return new Date(t * 1000).toLocaleString();
 }
 
+// Node colour by role: purple multicast, red broadcast, else blue local / orange
+// external. Mirrors the legend in App.tsx; keep the two in sync.
 export function nodeColor(kind: string, isLocal: boolean): string {
   if (kind === "multicast") return "#a855f7";
   if (kind === "broadcast") return "#ef4444";
   return isLocal ? "#3b82f6" : "#f59e0b";
 }
 
+// Edge colour flags a multicast/broadcast connection; ordinary unicast is grey.
 export function castColor(cast: string): string {
   if (cast === "multicast") return "#a855f7";
   if (cast === "broadcast") return "#ef4444";
   return "#64748b";
 }
 
+// Node diameter and edge width scale with the log of bytes (traffic spans many
+// orders of magnitude) and are clamped so the busiest node/edge can't dominate the
+// canvas and the quietest stays visible.
 export function nodeSize(bytes: number): number {
   return Math.max(10, Math.min(60, 8 + 7 * Math.log10(bytes + 10)));
 }

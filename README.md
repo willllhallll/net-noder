@@ -26,6 +26,7 @@ packets and memory stays bounded.
 - **web/** — Vite + React + Cytoscape.js front-end.
 - **data/** — capture files under `data/captures/`, the DuckDB file, and parquet
   scratch (all git-ignored).
+- **docs/** — design docs for each subsystem (see [Documentation](#documentation)).
 
 ## Setup
 
@@ -56,6 +57,14 @@ manually outside the container, run that script.
    **Labels** toggle switches node labels between IP and given name (falls back to IP
    where no name is known); names are also searchable.
 
+   You can likewise load a port → service reference (header:
+   `port,transport,description`) so conversations show a service name; like names it
+   is decoupled from packets and reloadable without re-ingesting:
+
+   ```bash
+   netnoder-portmap          # defaults to data/portmap/portmap.csv  (--merge to upsert)
+   ```
+
 3. **Serve** the API:
 
    ```bash
@@ -75,14 +84,20 @@ manually outside the container, run that script.
 | `endpoints`          | one row per IP (node): totals, first/last seen, local?, kind                     |
 | `connections`        | one row per IP pair (edge): per-direction packet/byte counts                     |
 | `conversations`      | per connection: protocol, server port, cast type, per-direction counts, server side |
-| `conversation_ports` | bounded top-N ephemeral/client ports per conversation                            |
+| `conversation_ports` | bounded top-N reply ports per conversation                                       |
 | `names`              | user-curated IP → given name (independent of captures)                           |
+| `port_services`      | user-curated port → service description (independent of captures)                |
 | `manifest`           | ingest bookkeeping for resumable runs                                            |
 
-The server picks the **server side** of each conversation with a heuristic
-(`transform.py`): a well-known/registered port wins, else the lower port number.
-That gives every conversation a direction (client → server) and identifies which
-endpoint owns the service port (`conversations.server_is_a`).
+Ingest picks the **server side** of each conversation
+([`transform.py`](ingest/netnoder_ingest/transform.py)) using the IANA ephemeral
+range (49152–65535): a port outside it is a service port and wins; if both or neither
+side is a service port, the lower port wins. That gives every conversation a direction
+(client → server) and identifies which endpoint owns the service port
+(`conversations.server_is_a`). When *both* ends are services, the flow is stored once
+and the API surfaces the reverse view as a role-flipped "mirror" arrow.
+
+See [docs/database.md](docs/database.md) for the full schema.
 
 Cast type is derived per packet from the destination (L2 group/broadcast bit, with
 IP-range fallbacks for L3-only captures). "Local" uses RFC1918/loopback/link-local
@@ -90,6 +105,16 @@ plus any CIDRs in `NETNODER_LOCAL_SUBNETS`.
 
 ## Configuration (env vars)
 
-- `NETNODER_DATA` (default `./data`), `NETNODER_CAPTURES` (default `data/captures/`), `NETNODER_DB`, `NETNODER_SCRATCH`, `NETNODER_NAMES` (default `data/names/`)
+- `NETNODER_DATA` (default `./data`), `NETNODER_CAPTURES` (default `data/captures/`), `NETNODER_DB`, `NETNODER_SCRATCH`, `NETNODER_NAMES` (default `data/names/`), `NETNODER_PORTMAP` (default `data/portmap/portmap.csv`)
 - `NETNODER_LOCAL_SUBNETS` — extra "local" CIDRs, comma-separated
 - `NETNODER_HOST` / `NETNODER_PORT` for the API
+
+## Documentation
+
+Design docs for each subsystem live in [docs/](docs/):
+
+- [Ingest pipeline](docs/ingest-pipeline.md) — where files go, the four ingest stages,
+  how aggregation works, and how to add ingest scripts.
+- [Database structure](docs/database.md) — the three-layer model and every table.
+- [API structure](docs/api.md) — the models and how raw rows are shaped into graph JSON.
+- [Web app UI flow](docs/ui-flow.md) — how to use the explorer, view by view.
