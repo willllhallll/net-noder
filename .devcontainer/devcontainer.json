@@ -6,25 +6,58 @@
   // --- Features ---
   "features": {
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
-    "ghcr.io/devcontainers-community/npm-features/prettier": 1,
+    "ghcr.io/devcontainers-community/npm-features/prettier": 1
+  },
+
+  // --- Ports: FastAPI (8000) and Vite dev server (5173) ---
+  "forwardPorts": [8000, 5173],
+
+  // --- Make the project virtualenv tools resolve on PATH ---
+  "remoteEnv": {
+    "PATH": "/workspaces/net-noder/.venv/bin:${containerEnv:PATH}"
   },
 
   // --- Editor customizations ---
   "customizations": {
     "vscode": {
-      "extensions": ["esbenp.prettier-vscode"],
+      "extensions": [
+        // Formatting & base language support
+        "esbenp.prettier-vscode",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+        // CSV
+        "mechatroner.rainbow-csv",
+        "janisdd.vscode-edit-csv",
+        // TypeScript / React
+        "dbaeumer.vscode-eslint",
+        "usernamehw.errorlens",
+        // General DX
+        "oderwat.indent-rainbow"
+      ],
       "settings": {
         "editor.formatOnSave": true,
         "editor.defaultFormatter": "esbenp.prettier-vscode",
-      },
-    },
+        "python.defaultInterpreterPath": "/workspaces/net-noder/.venv/bin/python",
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        },
+        "[sql]": {
+          "editor.defaultFormatter": "inferrinizzard.prettier-sql-vscode"
+        }
+      }
+    }
   },
   // --- Persist Claude Session ---
   "mounts": [
-    "source=claude-code-config,target=/home/vscode/.claude,type=volume",
+    "source=claude-code-config,target=/home/vscode/.claude,type=volume"
   ],
 
   // Runs once on container creation (not on every start) before VS Code attaches.
   // Ensures the mounted volume is owned by vscode so Claude can read/write its config.
-  "onCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo chmod -R u+rw /home/vscode/.claude"
+  "onCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo chmod -R u+rw /home/vscode/.claude",
+
+  // Installs tshark, the Python virtualenv (ingest + server), and web deps.
+  "postCreateCommand": "bash .devcontainer/post-create.sh"
 }

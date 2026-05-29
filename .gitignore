@@ -1,0 +1,33 @@
+# Data, database, and ingest scratch
+data/*
+!data/.gitkeep
+# Keep the captures/ dir in the tree, but not the capture files inside it.
+!data/captures/
+data/captures/*
+!data/captures/.gitkeep
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.pcap
+*.pcapng
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Node / web
+node_modules/
+web/dist/
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
