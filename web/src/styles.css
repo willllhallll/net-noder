@@ -140,15 +140,51 @@ input,
   inset: 0;
 }
 
-.legend {
+.legend,
+.layer-filter {
   position: absolute;
   left: 12px;
   bottom: 12px;
-  background: rgba(18, 24, 38, 0.9);
+  background: rgba(18, 24, 38, 0.92);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
   font-size: 12px;
+  max-width: 240px;
+}
+
+/* Tier stepper: the headline layer filter */
+.tier-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.tier-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+
+.tier-btn.active {
+  background: var(--accent);
+  color: #0b0f17;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.tier-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 220px;
+  overflow: auto;
 }
 
 /* Top-center overlay naming the current view (endpoint / connection); hidden in
@@ -368,4 +404,150 @@ table.kv td:first-child {
 
 .conv-role-server {
   font-weight: 600;
+}
+
+/* Given-name editor (endpoint drawer) */
+.name-editor {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 14px;
+}
+
+.name-editor input {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn {
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Connection drawer: protocol list */
+.proto-hint {
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+
+/* Flows-summary drawer: distinct 5-tuple ports per endpoint, side by side. */
+.port-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.port-col {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.port-col-head {
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.port-col-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.port-chip {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+/* Flow drawer: the protocol stack breadcrumb (eth › ip › tcp › tls …). */
+.flow-stack {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.flow-step {
+  display: inline-flex;
+  align-items: center;
+}
+
+.flow-arrow {
+  color: var(--muted);
+  margin: 0 4px;
+  font-size: 14px;
+}
+
+.flow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  background: var(--panel-2);
+}
+
+.flow-chip.unresolved {
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.flow-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+/* Flow drawer: the 5-tuple ports, one per endpoint, no direction. */
+.flow-ports {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 4px 0 10px;
+}
+
+.flow-port {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.flow-port-num {
+  font-family: ui-monospace, monospace;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.flow-port-sep {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
 }

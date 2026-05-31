@@ -5,6 +5,10 @@ import type { LabelMode } from "../types";
 
 cytoscape.use(fcose);
 
+// Vertical offset (model units) between adjacent parallel flow edges. Reused both as
+// the bezier fan spacing and to size the endpoint gap so the lens stays compact.
+const FLOW_STEP = 32;
+
 const STYLE: any[] = [
   {
     selector: "node",
@@ -21,7 +25,6 @@ const STYLE: any[] = [
       "text-outline-width": 1.4,
       "border-width": 1,
       "border-color": "#0b0f17",
-      // LOD: drop node labels when zoomed out so dense graphs stay readable.
       "min-zoomed-font-size": 8,
     },
   },
@@ -34,10 +37,16 @@ const STYLE: any[] = [
     style: {
       width: "data(weight)",
       "line-color": "data(color)",
-      // bezier so multiple parallel conversation edges between the same two
-      // endpoints fan out (and so arrowheads render correctly).
+      // Dashed = an unresolved representation (dissection stopped at 'data').
+      "line-style": "data(lineStyle)",
+      "line-dash-pattern": [6, 3],
       "curve-style": "bezier",
-      opacity: 0.5,
+      // Fan-out for the flow view: parallel edges between the same two endpoints
+      // spread enough that each flow (and its label) has room and they don't overlap.
+      "control-point-step-size": FLOW_STEP,
+      // Per-edge opacity drives the tier filter: edges with no protocol at the
+      // active tier are nearly transparent ("dimmed out").
+      opacity: "data(opacity)",
       label: "data(label)",
       "font-size": 6,
       "line-height": 1.15,
@@ -52,13 +61,8 @@ const STYLE: any[] = [
       "text-border-color": "data(color)",
       "text-border-opacity": 0.7,
       "text-border-width": 1,
-      // Directional arrow on conversation edges (client -> server); host-view
-      // connection edges set arrow "none" so they stay undirected.
-      "target-arrow-shape": "data(arrow)",
-      "target-arrow-color": "data(color)",
-      "arrow-scale": 0.9,
-      // Hide the chips when zoomed out so dense graphs stay readable;
-      // they fade back in as you zoom into a region.
+      // Undirected: edges never carry an arrowhead in the peer model.
+      "target-arrow-shape": "none",
       "min-zoomed-font-size": 6,
     },
   },
@@ -73,8 +77,10 @@ const STYLE: any[] = [
   },
 ];
 
-// fcose options scaled by graph size: large graphs use draft quality and skip the
-// animation so the layout stays feasible as node count approaches the cap.
+// The right-side drawer (320px) overlays the canvas; leave a margin past it so the
+// flow view's content is never centred underneath it.
+const DRAWER_W = 360;
+
 function layoutFor(nodeCount: number): any {
   const big = nodeCount > 1500;
   return {
@@ -90,16 +96,49 @@ function layoutFor(nodeCount: number): any {
   };
 }
 
+// Flow-fan view: place the two endpoints at a COMPACT, controlled horizontal gap
+// (proportional to the fan height) rather than spread across the viewport. Keeping
+// the content small in model space lets fitFlowView zoom right in, so the endpoint
+// and flow labels are large and readable by default.
+function placeFlowNodes(cy: Core): void {
+  const nodes = cy.nodes();
+  if (nodes.length !== 2) return;
+  const lensHalf = Math.max(FLOW_STEP, ((cy.edges().length - 1) * FLOW_STEP) / 2);
+  const gap = Math.max(220, lensHalf * 1.3); // a bit narrower than the fan is tall
+  nodes[0].position({ x: -gap / 2, y: 0 }); // ip_a (left)
+  nodes[1].position({ x: gap / 2, y: 0 });  // ip_b (right)
+}
+
+// Fit the flow-fan into the visible region to the LEFT of the drawer, so the
+// right-most endpoint sits beside the drawer rather than hidden behind it, zoomed in
+// enough (cap 3.5x) that labels are legible.
+function fitFlowView(cy: Core): void {
+  const W = cy.width();
+  const H = cy.height();
+  const avail = Math.max(240, W - DRAWER_W);
+  const pad = 50;
+  const bb = cy.elements().boundingBox();
+  if (bb.w === 0 || bb.h === 0) return;
+  const zoom = Math.max(
+    0.05,
+    Math.min((avail - 2 * pad) / bb.w, (H - 2 * pad) / bb.h, 3.5)
+  );
+  cy.zoom(zoom);
+  // Centre the content within the available (left-of-drawer) region.
+  cy.pan({
+    x: avail / 2 - zoom * (bb.x1 + bb.w / 2),
+    y: H / 2 - zoom * (bb.y1 + bb.h / 2),
+  });
+}
+
 interface Props {
   elements: ElementDefinition[];
   labelMode: LabelMode;
   onNodeTap: (ip: string) => void;
-  // Receives the tapped edge's full data so the caller can interpret it as a
-  // connection (host/focus view) or a conversation (drill-down view).
   onEdgeTap: (data: any) => void;
+  onBackgroundTap?: () => void;
 }
 
-// Given name when present and requested, else always the IP.
 function nodeLabel(d: any, mode: LabelMode): string {
   return mode === "name" && d.name ? d.name : d.ip;
 }
@@ -109,13 +148,13 @@ export default function GraphCanvas({
   labelMode,
   onNodeTap,
   onEdgeTap,
+  onBackgroundTap,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
-  const cbRef = useRef({ onNodeTap, onEdgeTap });
-  cbRef.current = { onNodeTap, onEdgeTap };
+  const cbRef = useRef({ onNodeTap, onEdgeTap, onBackgroundTap });
+  cbRef.current = { onNodeTap, onEdgeTap, onBackgroundTap };
 
-  // Initialise once.
   useEffect(() => {
     if (!containerRef.current) return;
     const cy = cytoscape({
@@ -123,8 +162,6 @@ export default function GraphCanvas({
       style: STYLE,
       elements: [],
       wheelSensitivity: 0.2,
-      // LOD/perf hints: hide edges and render a cached texture while panning/zooming
-      // so dense graphs stay interactive (see js.cytoscape.org initialisation docs).
       hideEdgesOnViewport: true,
       textureOnViewport: true,
       motionBlur: true,
@@ -132,13 +169,18 @@ export default function GraphCanvas({
     cyRef.current = cy;
     cy.on("tap", "node", (e) => cbRef.current.onNodeTap(e.target.id()));
     cy.on("tap", "edge", (e) => cbRef.current.onEdgeTap(e.target.data()));
+    // Tap on empty canvas (not a node/edge) — used to de-select the focused flow.
+    cy.on("tap", (e) => {
+      if (e.target === cy) cbRef.current.onBackgroundTap?.();
+    });
     return () => {
       cy.destroy();
       cyRef.current = null;
     };
   }, []);
 
-  // Sync elements incrementally (add new, drop removed), then relayout if changed.
+  // Sync elements: add new, drop removed, update data on the rest. Relayout only
+  // when the node/edge SET changes — a tier recolour just updates data in place.
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;
@@ -161,11 +203,19 @@ export default function GraphCanvas({
         }
       });
     });
-    if (changed) cy.layout(layoutFor(cy.nodes().length)).run();
+    if (changed) {
+      const n = cy.nodes().length;
+      if (n === 2) {
+        // Flow-fan view: position the pair compactly, then fit zoomed-in & clear of
+        // the drawer (no force layout needed for two fixed endpoints).
+        placeFlowNodes(cy);
+        fitFlowView(cy);
+      } else {
+        cy.layout(layoutFor(n)).run();
+      }
+    }
   }, [elements]);
 
-  // Relabel nodes when the IP/Name toggle changes (and after new nodes are added,
-  // since this effect is keyed on `elements` too and declared after the sync effect).
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;

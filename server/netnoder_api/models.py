@@ -1,8 +1,9 @@
 """Pydantic response models (also drive the OpenAPI schema at /docs).
 
-Three-layer model: endpoints (one IP), connections (any traffic between a pair of
-endpoints), and conversations (traffic toward one service endpoint within a
-connection, whose reply ports may be many ephemeral ports or a single service port).
+Peer/dissector model: no roles, no arrows, no IANA services, no local/remote. The
+API serves four views -- graph, endpoint, connection protocols, protocol ports --
+plus stats, the layer registry, search, and name editing. Direction is surfaced only
+as neutral A->B / B->A counters; the human judges direction from the volumes.
 """
 from typing import Optional
 
@@ -12,45 +13,52 @@ from pydantic import BaseModel
 class Stats(BaseModel):
     endpoints: int
     connections: int
-    conversations: int
+    flows: int
+    layers: int
     total_pkts: int
     total_bytes: int
     first_seen: Optional[float] = None
     last_seen: Optional[float] = None
+
+
+class Layer(BaseModel):
+    """One observed protocol token with its persisted tier + colour and usage count."""
+    layer: str
+    tier: str
+    colour: str
+    count: int  # distinct connections carrying this layer
+    unresolved: bool = False  # True for tshark stop-markers ('data'), not real protocols
 
 
 class Node(BaseModel):
     ip: str
+    kind: str  # 'unicast' | 'multicast' | 'broadcast'
+    given_name: Optional[str] = None
     total_pkts: int
     total_bytes: int
+    degree: int
     first_seen: Optional[float] = None
     last_seen: Optional[float] = None
-    is_local: bool
-    kind: str
-    hostname: Optional[str] = None
-    given_name: Optional[str] = None
-
-
-class EdgeConversation(BaseModel):
-    proto: str
-    port: Optional[int] = None
-    cast: str
 
 
 class Edge(BaseModel):
-    """A connection edge in the graph: any traffic between two endpoints."""
-    id: int
-    source: str
-    target: str
+    """An undirected peer edge. layers = the full token set present (client colours/filters)."""
+    connection_id: int
+    ip_a: str
+    ip_b: str
     pkts: int
     bytes: int
-    cast: str
-    conversations: list[EdgeConversation] = []  # top conversations listed inline
-    extra: int = 0  # count of conversations beyond those listed inline
+    pkts_a2b: int
+    bytes_a2b: int
+    pkts_b2a: int
+    bytes_b2a: int
+    layers: list[str] = []
+    flow_count: int = 0  # distinct flows (5-tuples) shared by the pair
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
 
 
 class GraphMeta(BaseModel):
-    """Host-view truncation info: set when the node cap (MAX_GRAPH_NODES) trips."""
     capped: bool
     cap: int
     shown_endpoints: int
@@ -60,54 +68,43 @@ class GraphMeta(BaseModel):
 class Graph(BaseModel):
     nodes: list[Node]
     edges: list[Edge]
-    meta: Optional[GraphMeta] = None  # only the full host graph sets this
+    meta: Optional[GraphMeta] = None
 
 
-class NodeDetail(Node):
-    degree: int
+# Endpoint detail is just a node (which already carries degree).
+EndpointDetail = Node
 
 
-class Conversation(BaseModel):
-    """Traffic toward one service endpoint (proto + server port) within a connection."""
+class Flow(BaseModel):
+    """One canonical 5-tuple: l4 proto + the two ports, with its full dissected stack.
+
+    `layers` is the ordered protocol stack (eth up). Direction is neutral A->B / B->A.
+    """
+    flow_id: int
     l4_proto: str
-    server_port: Optional[int] = None
-    cast_type: str
+    port_a: Optional[int] = None  # port on ip_a side (NULL for portless L4 e.g. icmp)
+    port_b: Optional[int] = None
     pkts_a2b: int
     bytes_a2b: int
     pkts_b2a: int
     bytes_b2a: int
-    reply_port_count: int = 0  # distinct reply ports for this conversation
-    server_is_a: Optional[bool] = None  # True: ip_a is the server; False: ip_b; None: no service port
-    service: Optional[str] = None  # port_services description for server_port; None -> "No Service Info"
+    layers: list[str] = []
     first_seen: Optional[float] = None
     last_seen: Optional[float] = None
 
 
-class ReplyPort(BaseModel):
-    port: int
-    pkts: int
-    bytes: int
-
-
-class ReplyPorts(BaseModel):
-    l4_proto: str
-    server_port: int
-    cast_type: str
-    total: int           # distinct reply ports overall
-    truncated: bool      # True if more exist than returned
-    ports: list[ReplyPort]
-
-
-class ConnectionDetail(BaseModel):
-    id: int
+class ConnectionFlows(BaseModel):
+    """Edge-click view: the pair summary + every flow between the two endpoints."""
+    connection_id: int
     ip_a: str
     ip_b: str
     name_a: Optional[str] = None
     name_b: Optional[str] = None
+    kind_a: str
+    kind_b: str
     pkts_a2b: int
     bytes_a2b: int
     pkts_b2a: int
     bytes_b2a: int
-    first_seen: Optional[float] = None
-    last_seen: Optional[float] = None
-    conversations: list[Conversation]
+    flow_count: int
+    flows: list[Flow]

@@ -1,31 +1,28 @@
-import type { NodeDetail } from "../types";
+import type { NodeT } from "../types";
 import { fmtBytes, fmtNum, fmtTime, nodeColor } from "../format";
 import Drawer from "./Drawer";
 
 interface Props {
-  data: NodeDetail;
-  // Exits the focused view and returns to the unfiltered host graph.
+  data: NodeT;
   onBack: () => void;
 }
 
-// Endpoint detail drawer, shown while the graph is filtered to this endpoint's
-// connections. Its ✕ button is the only way back to the full graph.
+// Endpoint detail drawer (node focus). kind chip only -- no local/remote. Given
+// names are sourced from names.csv (loaded into the store by `netnoder-names`), so
+// they are displayed here read-only.
 export default function EndpointPanel({ data, onBack }: Props) {
   return (
     <Drawer onBack={onBack} backIcon="✕">
       <h2>
-        <span
-          className="dot"
-          style={{ background: nodeColor(data.kind, data.is_local) }}
-        />
+        <span className="dot" style={{ background: nodeColor(data.kind) }} />
         {data.given_name ?? data.ip}
       </h2>
       {data.given_name && <div className="conv-dir muted">{data.ip}</div>}
       <div className="badges">
         <span className="badge">{data.kind}</span>
-        <span className="badge">{data.is_local ? "local" : "external"}</span>
         <span className="badge">{data.degree} peers</span>
       </div>
+
       <table className="kv">
         <tbody>
           <tr>

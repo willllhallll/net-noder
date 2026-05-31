@@ -59,5 +59,10 @@
   "onCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo chmod -R u+rw /home/vscode/.claude",
 
   // Installs tshark, the Python virtualenv (ingest + server), and web deps.
-  "postCreateCommand": "bash .devcontainer/post-create.sh"
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "containerEnv": {
+    "MAX_THINKING_TOKENS": "10000",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
+  }
 }

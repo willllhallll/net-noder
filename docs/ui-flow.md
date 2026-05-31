@@ -1,106 +1,68 @@
 # Web app UI flow
 
-A short guide to using the net-noder explorer, and a map of how the UI is built. The
-front-end is Vite + React + [Cytoscape.js](https://js.cytoscape.org); code is in
-[web/src/](../web/src/).
-
-## Getting it on screen
-
-- **Dev:** `cd web && npm run dev`, then open <http://localhost:5173>. Vite proxies
-  `/api` to the FastAPI server on `:8000`, so run `netnoder-api` alongside it.
-  (In this repo you can just run the `/dev` task, which starts both.)
-- **Single URL:** `cd web && npm run build`, then `netnoder-api` serves the built app
-  at <http://localhost:8000>.
-
-If the graph is empty or you see an error strip, the database probably hasn't been
-built yet — run `netnoder-ingest` first (see [ingest-pipeline.md](ingest-pipeline.md)).
-
-## The three views
-
-The whole app is one screen with a graph canvas and a right-side drawer. You move
-through **three nested views**, each one a deeper zoom:
+The explorer is a single Cytoscape graph with a right-side drawer that drills in
+without losing context. The flow is:
 
 ```
-   Hosts view  ──click a node──>  Endpoint view  ──click an edge──>  Connection view
-   (all hosts)                    (one host's links)                 (one pair's services)
-        ^                                 │                                   │
-        └──────────────── ✕ ─────────────┘                                   │
-                          └──────────────────────── ← ────────────────────────┘
+graph ──tap node──> focus (endpoint) ──tap edge──> connection (protocols) ──tap protocol──> ports
 ```
 
-### 1. Hosts view — the whole network
+State lives in [App.tsx](../web/src/App.tsx): a `graphView` (`hosts` | `focus`) for
+what the canvas shows, and a `drawer` (`connection` | `ports`) stacked on top. The
+drawer's **←** steps back one level; the endpoint drawer's **✕** returns to the full
+graph.
 
-On load you get the **host graph**: every endpoint as a circle, every connection as a
-line. This is the bytes-ranked, capped view from `GET /api/graph`.
+## The graph ([GraphCanvas.tsx](../web/src/components/GraphCanvas.tsx))
 
-Reading the picture:
+- **Nodes** are coloured by `kind` only — unicast (blue), multicast (purple),
+  broadcast (red) — and sized by bytes (log scale). No local/remote.
+- **Edges are undirected** (no arrowheads); an edge exists iff any connection does.
+- **Default view:** edges are neutral grey and labelled by their most-specific
+  protocol token (e.g. `tls`, `dns`). No colour clutter until you step into a tier.
 
-- **Circle size** = total bytes for that endpoint (log-scaled).
-- **Circle colour** = blue local host · orange external host · purple multicast ·
-  red broadcast (see the on-screen **legend**, bottom-left).
-- **Line thickness** = bytes on that connection; **line colour** marks a
-  multicast/broadcast connection.
-- **Edge labels** preview the top services on a connection, e.g. `tcp/443`, `udp/53`,
-  `+4 more`. Labels fade out when you zoom out so dense graphs stay readable.
+## The tier stepper ([LayerFilter.tsx](../web/src/components/LayerFilter.tsx))
 
-If the capture has more endpoints than the cap, a **"Too many endpoints"** modal
-appears on load: only the highest-traffic hosts are drawn, but every host is still
-reachable via click-through and search — nothing is lost.
+The headline control walks the protocol tiers
+`link → network → transport → application`. At the active tier:
 
-### 2. Endpoint view — focus one host
+- each edge is **coloured + labelled** by the specific protocol it carries there
+  (stepping app→transport flips an edge from `tls` brown to `tcp` blue);
+- edges with **no protocol at that tier dim out** — filtering is purely layer-based;
+- the **legend is scoped to the active tier**, listing only the colours currently on
+  the graph, so the colour↔protocol mapping is always unambiguous.
 
-**Click a node** (or pick one from search) to focus it. The graph filters to just
-that endpoint and its top connections (`GET /api/node/{ip}/neighbors`), and a drawer
-opens on the right showing the endpoint's details: kind, local/external, peer count
-(degree), packets, bytes, and first/last seen.
+Colours come from `/api/layers` and are stable across sessions (see
+[api.md](api.md#layers-tiers-and-colour)). Edge styling is recomputed in place when
+the tier changes — no relayout.
 
-Press the drawer's **✕** to return to the full hosts view.
+## Endpoint drawer ([EndpointPanel.tsx](../web/src/components/EndpointPanel.tsx))
 
-### 3. Connection view — one pair's conversations
+Tapping a node focuses the graph on its neighbours and opens its detail: name/IP, a
+`kind` chip, degree, totals, and first/last seen. Given-names are **read-only** here
+— they are sourced from `names.csv` (loaded into the store by `netnoder-names`),
+shown via the label toggle and search.
 
-**Click a connection edge** to drill in (`GET /api/connection`). The graph now shows
-just the two endpoints, with **one directed edge per conversation** — each a service
-on that connection. An arrowhead points **client → server**; a conversation with no
-service port (e.g. ICMP) is drawn undirected.
+## Connection drawer ([ConnectionPanel.tsx](../web/src/components/ConnectionPanel.tsx))
 
-**Click a conversation edge** to load its details into the drawer:
+Tapping an edge shows the pair as **A ↔ B** (no arrows, kind dots) with neutral
+**A→B / B→A** volumes, then the list of protocols the pair shares (from
+`connection_protocols`). Each row is coloured by the layer palette and shows the
+layer, its L4 transport, neutral per-direction volumes, and a `port_count`. The
+counts are **presence-based** (a layer includes everything above it), not a
+100%-summing split. Tapping a protocol opens its ports.
 
-- the service name (from the port registry) and protocol/cast badges,
-- the resolved **client → server** direction,
-- per-direction packet and byte counts,
-- and the **reply ports** — the (top-N by bytes) ephemeral or peer ports that talked
-  to this service (`GET /api/conversation/ports`), loaded lazily on click.
+## Protocol-ports drawer ([ProtocolPortsPanel.tsx](../web/src/components/ProtocolPortsPanel.tsx))
 
-The drawer's **←** button steps back one layer — to the endpoint you came from, or to
-the hosts view if you drilled straight in.
+Header `A ↔ B · <layer>` accented with the layer colour. Every real port-pair
+carrying that layer is listed, **grouped under whichever side has fewer distinct
+ports** (a neutral display compaction — a **swap** toggle flips it, not a role claim).
+The peer-port list is **virtualized** to handle tens of thousands of ephemeral ports,
+with an in-drawer port search. Each row shows neutral **A→B / B→A** volumes. Ports
+appear only here — never on the graph.
 
-## Top bar controls
+## Search ([SearchBar.tsx](../web/src/components/SearchBar.tsx))
 
-- **Stat strip** — total endpoints, connections, conversations, and bytes for the
-  whole capture (`GET /api/stats`).
-- **Labels** — toggle node labels between **IP** and **Given name**. Names come from
-  the `names` table; an endpoint with no given name still shows its IP.
-- **Find endpoint** — search by IP prefix (`192.168`) or by name/hostname substring
-  (`laptop`). Picking a result jumps straight to that endpoint's Endpoint view, so
-  search reaches hosts that the capped host graph didn't draw.
-
-## How the front-end is wired
-
-| File | Role |
-| ---- | ---- |
-| [App.tsx](../web/src/App.tsx) | Owns the `view` state machine (`hosts` / `focus` / `connection`), fetches data, and converts API responses into Cytoscape elements. |
-| [api.ts](../web/src/api.ts) | Tiny typed `fetch` wrapper, one method per endpoint. |
-| [types.ts](../web/src/types.ts) | TypeScript mirrors of the API's Pydantic models. |
-| [components/GraphCanvas.tsx](../web/src/components/GraphCanvas.tsx) | The Cytoscape canvas: styling, the `fcose` layout, level-of-detail/perf tuning, and node/edge tap callbacks. Updates elements incrementally. |
-| [components/Controls.tsx](../web/src/components/Controls.tsx) | Labels toggle + endpoint search box. |
-| [components/EndpointPanel.tsx](../web/src/components/EndpointPanel.tsx) | Endpoint-view drawer. |
-| [components/ConnectionPanel.tsx](../web/src/components/ConnectionPanel.tsx) | Connection-view drawer + conversation detail + reply ports. |
-| [components/Drawer.tsx](../web/src/components/Drawer.tsx) | Shared right-drawer chrome with the single back/close button. |
-| [components/CapNoticeModal.tsx](../web/src/components/CapNoticeModal.tsx) | The "too many endpoints" notice. |
-| [format.ts](../web/src/format.ts) | Pure helpers: byte/number/time formatting, the colour scheme, log-scaled node sizes and edge widths, and conversation direction/label resolution. |
-
-The key idea in `App.tsx`: the view is a small discriminated union, and `elements`
-(the Cytoscape graph) is *derived* from it with `useMemo`. Drilling down stores where
-you came from (`origin`) so the back button can always return one layer up, and the
-host graph's node elements are reused in the connection view so colours, sizes, and
-labels stay consistent across views.
+The top bar carries the IP/given-name label toggle and an endpoint search (IP prefix
+or name substring); picking a result focuses that endpoint. When a capture exceeds
+the node cap, [CapNoticeModal.tsx](../web/src/components/CapNoticeModal.tsx) explains
+that the top talkers are shown and the rest is still reachable via search/drill-down.

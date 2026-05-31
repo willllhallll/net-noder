@@ -4,15 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netnoder-ingest"
-version = "0.1.0"
-description = "Ingest pcap files into the net-noder aggregated DuckDB store"
+version = "0.2.0"
+description = "Ingest pcap files into the net-noder flow-grain DuckDB store (peer/dissector model)"
 requires-python = ">=3.10"
 dependencies = ["duckdb>=1.1"]
 
 [project.scripts]
 netnoder-ingest = "netnoder_ingest.cli:main"
 netnoder-names = "netnoder_ingest.names:main"
-netnoder-portmap = "netnoder_ingest.portmap:main"
 
 [tool.setuptools]
 packages = ["netnoder_ingest"]

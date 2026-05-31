@@ -1,146 +1,120 @@
 # Database structure
 
-net-noder stores everything in a single embedded **DuckDB** file
-(`data/netnoder.duckdb`). There is no server process and no migrations — the schema
-is plain `CREATE TABLE IF NOT EXISTS` statements in
-[schema.sql](../ingest/netnoder_ingest/schema.sql), applied every time a connection
-is opened.
+**One DuckDB store** (`data/netnoder.duckdb`, `NETNODER_DB`), built by ingest and
+served **read-only** by the API. Schema in
+[schema.sql](../ingest/netnoder_ingest/schema.sql). It holds three kinds of table:
 
-The design goal is to take an arbitrarily large packet capture and reduce it to a set
-of **small, fixed-shape rollup tables** that describe the network at three levels of
-zoom. Raw packets are discarded after aggregation; only the rollups remain.
+- **Rebuildable analytical data** — `flows`, `flow_layers`, and the derived views;
+  wiped + rebuilt on every aggregation / `--reset`.
+- **Durable metadata** — `names` (loaded from `names.csv`) and `layer_colours` (the
+  persisted tier+colour registry). These are **preserved across `--reset`** and
+  re-aggregation; they are only lost if the DuckDB file itself is deleted.
+- **Reference / bookkeeping** — `protocols`, `manifest`.
 
-## The three-layer model
+There is no separate API metadata store: the API writes nothing.
+
+The model is **peer-to-peer**: no client/server roles, no ephemeral filtering, no
+IANA port map, no local/remote. Protocol identity comes solely from the tshark
+dissector. Direction is recorded only as neutral per-direction counters.
+
+## The base of record: `flows` + `flow_layers`
+
+Because we keep the **full layer set** *and* **every port**, the protocol stack is
+multi-valued per flow. Splitting the fact from its layer membership keeps the schema
+normalised (see ETNF below).
 
 ```
-endpoints        a single device (one IP)
-   │   one row per IP
-   │
-connections      ALL traffic between a pair of endpoints (an undirected edge)
-   │   one row per {ip_a, ip_b} pair
-   │
-conversations    traffic toward ONE service endpoint within a connection
-   │   one row per (connection, protocol, server_port, cast_type, server_is_a)
-   │
-conversation_ports   the reply ports that talked to that service (top-N by bytes)
+flows                              -- FACT: one row per canonical 5-tuple; key -> measures
+  flow_id        BIGINT  PK        -- surrogate
+  connection_id  BIGINT            -- FK -> connections
+  l4_proto       VARCHAR           -- 'tcp'|'udp'|'icmp'|'gre'|... (from ip.proto)
+  port_a/port_b  INTEGER           -- real ports (NULL for portless L4); port_a is on ip_a
+  pkts_a2b, bytes_a2b              -- per-direction counters (neutral A->B)
+  pkts_b2a, bytes_b2a              -- per-direction counters (neutral B->A)
+  first_seen, last_seen  DOUBLE
+  -- ALT KEY (UNIQUE): (connection_id, l4_proto, port_a, port_b)
+
+flow_layers                        -- the dissected stack, one row per (flow, layer)
+  flow_id        BIGINT            -- FK -> flows
+  layer_index    SMALLINT          -- position in the stack (0=link ... n=app)
+  layer          VARCHAR           -- single token: 'eth','ip','tcp','tls','http',...
+  PRIMARY KEY (flow_id, layer_index)
+  -- ALT KEY: (flow_id, layer)
 ```
 
-Each layer is a finer slice of the one above it, so the UI can drill from "who is on
-the network" → "who talks to whom" → "what service" → "which ports".
+The **deepest** `frame.protocols` stack seen for a 5-tuple (the superset
+`tcp ⊂ tcp:tls ⊂ tcp:tls:http`) is split into `flow_layers`. The `ethertype` noise
+token is dropped and the remaining tokens are re-indexed contiguously from 0.
 
-### Canonical pair orientation
+## Derived views (rebuilt atomically each aggregation)
 
-Connections (and everything keyed off them) use a **canonical orientation**: `ip_a`
-is always the lexicographically smaller IP and `ip_b` the larger. Direction is then
-encoded in column *names* rather than row order:
+```
+endpoints (nodes)                connections (edges, peer pairs)
+  ip PRIMARY KEY                   connection_id PRIMARY KEY
+  total_pkts, total_bytes          ip_a, ip_b            -- ip_a <= ip_b, NO roles
+  first_seen, last_seen            pkts_a2b, bytes_a2b    -- neutral per-direction
+  kind (uni/multi/bcast)           pkts_b2a, bytes_b2a
+  degree                           cast_type             -- derived from endpoint kinds
+                                   protocol_count, port_count, first/last_seen
 
-- `*_a2b` = traffic from `ip_a` to `ip_b`
-- `*_b2a` = traffic from `ip_b` to `ip_a`
+connection_layers                connection_protocols  -- THE edge-click view
+  connection_id                    connection_id
+  layer                            layer       -- 'tcp','tls','http','dns','quic',...
+  -- full distinct stack           l4_proto
+  -- (incl eth/ip) for the         pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a  -- presence-based
+  -- graph tier filter             port_count, first_seen, last_seen
+                                   -- = flows ⋈ flow_layers GROUP BY (conn, layer, l4)
+                                   --   [generic link/network tokens stripped]
+```
 
-This is why a packet and its reply always land in the same row — neither "who sent
-first" nor src/dst order changes which group a packet falls into.
+`connection_protocols` counts are **presence-based, not a partition** — a TLS/HTTP
+flow's bytes count under `tcp`, `tls`, and `http`. The view reads as "which protocol
+layers are present, and how much traffic involved each" (the UI shows them as
+overlapping layers, not a 100%-summing breakdown).
 
-## Tables
+`cast_type` is *not* stored per flow — it is functionally determined by the pair, so
+it lives on `connections`, derived from the two endpoints' `kind`.
 
-### `endpoints` — the nodes
+## Reference + bookkeeping
 
-| column        | type    | meaning                                          |
-| ------------- | ------- | ------------------------------------------------ |
-| `ip`          | VARCHAR | primary key                                      |
-| `total_pkts`  | BIGINT  | packets sent + received                          |
-| `total_bytes` | BIGINT  | bytes sent + received (drives node size in the UI) |
-| `first_seen` / `last_seen` | DOUBLE | epoch seconds                       |
-| `is_local`    | BOOLEAN | RFC1918 / loopback / link-local / extra subnets  |
-| `kind`        | VARCHAR | `unicast` \| `multicast` \| `broadcast`          |
-| `hostname`    | VARCHAR | reserved for capture-derived names (currently unused) |
+```
+protocols (abbrev PK, name, short_name)   -- tshark -G protocols dump; validation only
+manifest  (path, size, mtime, status,...) -- resumable ingest bookkeeping
+```
 
-### `connections` — the edges
+## Durable metadata (same store, preserved across --reset)
 
-| column      | type    | meaning                                      |
-| ----------- | ------- | -------------------------------------------- |
-| `id`        | BIGINT  | primary key (ranked by total bytes at build) |
-| `ip_a` / `ip_b` | VARCHAR | the pair, canonical (`ip_a <= ip_b`)     |
-| `pkts_a2b`, `bytes_a2b`, `pkts_b2a`, `bytes_b2a` | BIGINT | per-direction counts |
-| `first_seen` / `last_seen` | DOUBLE | epoch seconds                    |
+```
+names         (ip PK, given_name)                       -- loaded from names.csv by
+                                                        -- `netnoder-names`; joined at query time
+layer_colours (layer PK, tier, colour, seq, unresolved) -- first-seen-wins colour registry;
+                                                        -- anchors seeded with seq = -1;
+                                                        -- unresolved=TRUE for stop-markers ('data')
+```
 
-One row per pair of endpoints, regardless of how many ports/protocols they used.
+`netnoder-ingest` excludes both from `--reset` and never re-allocates an existing
+`layer_colours` row, so a given name and a token's colour are stable for the life of
+the store. Colours are seeded/extended at ingest by
+[palette.py](../ingest/netnoder_ingest/palette.py).
 
-### `conversations` — per-service detail
+## Why this is ETNF (and 5NF for the base relations)
 
-Keyed by `(connection_id, l4_proto, server_port, cast_type, server_is_a)`. A service
-port used by **both** ends produces two rows (one per direction) — each is a directed
-`client → server` arrow in the UI.
+ETNF (Date/Darwen/Fagin) = BCNF *and* every join dependency has a superkey
+component — the exact condition for "no redundant tuples".
 
-| column             | type    | meaning                                          |
-| ------------------ | ------- | ------------------------------------------------ |
-| `connection_id`    | BIGINT  | → `connections.id`                               |
-| `l4_proto`         | VARCHAR | `TCP`, `UDP`, `ICMP`, …                           |
-| `server_port`      | INTEGER | the service port; `NULL` for non-TCP/UDP         |
-| `cast_type`        | VARCHAR | `unicast` \| `multicast` \| `broadcast`          |
-| `pkts_a2b` … `bytes_b2a` | BIGINT | per-direction counts (same `a`/`b` as the connection) |
-| `reply_port_count` | BIGINT  | distinct reply ports seen (the *true* total)     |
-| `server_is_a`      | BOOLEAN | `TRUE`: `ip_a` owns `server_port`; `FALSE`: `ip_b`; `NULL`: no service port |
-| `first_seen` / `last_seen` | DOUBLE | epoch seconds                          |
+| Relation | Candidate key(s) | Non-trivial FDs | BCNF | JDs beyond keys | ETNF |
+|---|---|---|---|---|---|
+| `flows` | `{flow_id}`; alt `{connection_id,l4,port_a,port_b}` | key → measures | ✓ | none | ✓ (5NF) |
+| `flow_layers` | `{flow_id,layer_index}`; alt `{flow_id,layer}` | keys determine each other | ✓ (all prime) | none | ✓ (5NF) |
+| `names` | `{ip}` | ip → given_name | ✓ | none | ✓ |
 
-`server_is_a` is what lets the UI draw the arrow the right way round, and it is part
-of the key because the two directional rows of a service-to-service flow share the
-same `server_port`.
+The naïve "one row per flow×layer with the measures inline" would make the measures
+depend on a *proper subset* of the key (a partial dependency) — failing BCNF with a
+textbook update anomaly. Splitting into `flows` + `flow_layers` removes it.
 
-### `conversation_ports` — bounded port breakdown
-
-The finest grain: which **reply ports** talked to a conversation's service port. Only
-the **top 50 by bytes** per conversation are kept (`reply_port_count` on the parent
-row holds the true distinct count). Joins back to a conversation via the full key
-including `server_is_a`.
-
-Counts here are directional (`a2b`/`b2a`, same orientation as `connections`). That is
-deliberate: it lets the API re-present a non-ephemeral reply port as a role-flipped
-"mirror" conversation without ever touching raw packets again
-(see [api.md](api.md#mirror-conversations)).
-
-## User-curated tables (independent of captures)
-
-These are **not** rebuilt by ingest and survive `--reset`. They are joined onto the
-rollups at query time, so editing them never requires re-aggregating packets.
-
-### `names`
-
-| column       | type    | meaning             |
-| ------------ | ------- | ------------------- |
-| `ip`         | VARCHAR | primary key         |
-| `given_name` | VARCHAR | friendly label      |
-
-Loaded by `netnoder-names` from `data/names/*.csv`. Used for node labels (the UI
-**Labels** toggle) and search.
-
-### `port_services`
-
-| column        | type    | meaning                          |
-| ------------- | ------- | -------------------------------- |
-| `port`        | INTEGER | part of primary key              |
-| `transport`   | VARCHAR | `tcp` \| `udp` \| `sctp` \| … (part of primary key) |
-| `description` | VARCHAR | human-readable service name      |
-
-Loaded by `netnoder-portmap`. Joined onto `conversations.server_port` to show a
-service description in the connection drawer (falls back to "No Service Info").
-
-## Bookkeeping
-
-### `manifest`
-
-Tracks which captures have been extracted, for **resumable** ingest: `path` (PK),
-`size`, `mtime`, `status` (`done`/`error`), row count, shard path, and timestamp. A
-capture is re-extracted only if its size/mtime changed or its shard went missing.
-
-## Indexes
-
-Connection lookups are by IP and conversation lookups are by connection, so the
-schema indexes `connections(ip_a)`, `connections(ip_b)`,
-`conversations(connection_id)`, and `conversation_ports(connection_id)`. These keep
-the neighbour and drill-down queries fast even on large captures.
-
-## Concurrency note
-
-DuckDB allows many read-only readers but only one read-write process. The API opens
-the file **read-only**, so multiple API workers are fine — but do **not** run
-`netnoder-ingest` against the database while the API is serving it.
+Crucially, the repetition of a token like `tls` across 50,000 ephemeral-port flows is
+**not** an ETNF violation: because we *reject* port→protocol, `port_b = 443` does not
+functionally determine `layer = tls`. Each flow's layer set is an independent fact, so
+no join dependency forces those tuples. (The old IANA model — `443 ⇒ https` — *would*
+have introduced exactly that non-superkey FD.) Physical repetition of the token is
+absorbed by DuckDB's columnar dictionary/RLE encoding, so it costs ~nothing on disk.

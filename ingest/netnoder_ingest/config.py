@@ -2,6 +2,12 @@
 
 Run ingest from the project root so the default ``./data`` location works, or set
 the ``NETNODER_*`` environment variables to override.
+
+There is no port map and no local-subnet configuration: the peer/dissector model
+takes protocols straight from tshark and classifies endpoints only as
+unicast/multicast/broadcast. There is a single DuckDB store: given-names (from
+``NAMES_CSV``) and the layer-colour registry live in it alongside the analytical
+tables -- there is no separate API metadata DB.
 """
 import os
 from pathlib import Path
@@ -14,19 +20,12 @@ CAPTURES_DIR = Path(
 SCRATCH_DIR = Path(
     os.environ.get("NETNODER_SCRATCH", str(DATA_DIR / "scratch"))
 ).resolve()
+# The single DuckDB store: analytical tables + names + layer_colours. Built by
+# ingest, served read-only by the API.
 DB_PATH = Path(os.environ.get("NETNODER_DB", str(DATA_DIR / "netnoder.duckdb"))).resolve()
-# Directory of IP -> given-name CSVs (header: ip,given_name). May hold several files.
-NAMES_DIR = Path(os.environ.get("NETNODER_NAMES", str(DATA_DIR / "names"))).resolve()
-# Reference CSV of port -> service descriptions (header: port,transport,description,...).
-PORTMAP_PATH = Path(
-    os.environ.get("NETNODER_PORTMAP", str(DATA_DIR / "portmap" / "portmap.csv"))
-).resolve()
-
-# Extra subnets (comma-separated CIDRs) to treat as "local" beyond the usual
-# RFC1918 / loopback / link-local ranges, e.g. "10.0.0.0/8,192.0.2.0/24".
-EXTRA_LOCAL_SUBNETS = [
-    s.strip() for s in os.environ.get("NETNODER_LOCAL_SUBNETS", "").split(",") if s.strip()
-]
+# CSV source of truth for user given-names (header: ip,given_name). Auto-loaded by
+# ingest if present; also loadable on its own via `netnoder-names`.
+NAMES_CSV = Path(os.environ.get("NETNODER_NAMES", str(DATA_DIR / "names.csv"))).resolve()
 
 
 def ensure_dirs() -> None:

@@ -1,52 +1,58 @@
+// Peer/dissector model: no roles, no arrows, no IANA services, no local/remote.
+// Direction is surfaced only as neutral A->B / B->A counters.
+
 export interface Stats {
   endpoints: number;
   connections: number;
-  conversations: number;
+  flows: number;
+  layers: number;
   total_pkts: number;
   total_bytes: number;
   first_seen: number | null;
   last_seen: number | null;
 }
 
-export interface NodeT {
-  ip: string;
-  total_pkts: number;
-  total_bytes: number;
-  first_seen: number | null;
-  last_seen: number | null;
-  is_local: boolean;
-  kind: string;
-  hostname: string | null;
-  given_name: string | null;
+export type Tier = "link" | "network" | "transport" | "application";
+
+// One observed protocol token with its persisted tier + colour and usage count.
+export interface Layer {
+  layer: string;
+  tier: Tier;
+  colour: string;
+  count: number;
+  unresolved: boolean; // true for tshark stop-markers ('data'), not real protocols
 }
 
 export type LabelMode = "ip" | "name";
 
-export interface NodeDetail extends NodeT {
+export interface NodeT {
+  ip: string;
+  kind: string; // 'unicast' | 'multicast' | 'broadcast'
+  given_name: string | null;
+  total_pkts: number;
+  total_bytes: number;
   degree: number;
+  first_seen: number | null;
+  last_seen: number | null;
 }
 
-// Inline chip summarising one conversation on a connection edge.
-export interface EdgeConversation {
-  proto: string;
-  port: number | null;
-  cast: string;
-}
-
-// A connection edge: any traffic between two endpoints.
+// An undirected peer edge. `layers` is the full token set present on the edge.
 export interface EdgeT {
-  id: number;
-  source: string;
-  target: string;
+  connection_id: number;
+  ip_a: string;
+  ip_b: string;
   pkts: number;
   bytes: number;
-  cast: string;
-  conversations: EdgeConversation[];
-  extra: number;
+  pkts_a2b: number;
+  bytes_a2b: number;
+  pkts_b2a: number;
+  bytes_b2a: number;
+  layers: string[];
+  flow_count: number; // distinct flows (5-tuples) shared by the pair
+  first_seen: number | null;
+  last_seen: number | null;
 }
 
-// Host-view truncation info, present only on the full graph response. `capped`
-// is true when the dataset exceeded the node cap and only the top endpoints show.
 export interface GraphMeta {
   capped: boolean;
   cap: number;
@@ -60,50 +66,36 @@ export interface Graph {
   meta?: GraphMeta;
 }
 
-// Traffic toward one service endpoint (proto + server port) within a connection.
-export interface Conversation {
+// One canonical 5-tuple: the L4 proto + its two ports, plus the full dissected
+// stack (`layers`, ordered from eth up). Direction is neutral A->B / B->A. This is
+// the unit of drill-down — one flow becomes one arrow in the flow-fan view.
+export interface Flow {
+  flow_id: number;
   l4_proto: string;
-  server_port: number | null;
-  cast_type: string;
+  port_a: number | null; // port on ip_a side (null for portless L4, e.g. icmp)
+  port_b: number | null;
   pkts_a2b: number;
   bytes_a2b: number;
   pkts_b2a: number;
   bytes_b2a: number;
-  reply_port_count: number;
-  // true: ip_a is the server; false: ip_b; null: no service port (undirected).
-  server_is_a: boolean | null;
-  // port_services description for server_port; null -> "No Service Info".
-  service: string | null;
+  layers: string[]; // ordered stack: ['eth','ip','tcp','tls',...]
   first_seen: number | null;
   last_seen: number | null;
 }
 
-export interface ReplyPort {
-  port: number;
-  pkts: number;
-  bytes: number;
-}
-
-export interface ReplyPorts {
-  l4_proto: string;
-  server_port: number;
-  cast_type: string;
-  total: number;
-  truncated: boolean;
-  ports: ReplyPort[];
-}
-
-export interface ConnectionDetail {
-  id: number;
+// Edge-click payload: the pair summary + every flow between the two endpoints.
+export interface ConnectionFlows {
+  connection_id: number;
   ip_a: string;
   ip_b: string;
   name_a: string | null;
   name_b: string | null;
+  kind_a: string;
+  kind_b: string;
   pkts_a2b: number;
   bytes_a2b: number;
   pkts_b2a: number;
   bytes_b2a: number;
-  first_seen: number | null;
-  last_seen: number | null;
-  conversations: Conversation[];
+  flow_count: number;
+  flows: Flow[];
 }

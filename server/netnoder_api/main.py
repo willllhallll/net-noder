@@ -1,4 +1,5 @@
-"""FastAPI app: graph queries over the aggregated store, plus static web hosting.
+"""FastAPI app: the four peer/dissector views over the analytical store, plus the
+layer registry, search, name editing, and static web hosting.
 
 In production, if ``web/dist`` exists it's mounted at ``/`` so the whole tool is one
 local URL. In dev, run Vite separately and let it proxy ``/api`` to this server.
@@ -12,15 +13,15 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db, queries
 from .models import (
-    ConnectionDetail,
+    ConnectionFlows,
+    EndpointDetail,
     Graph,
+    Layer,
     Node,
-    NodeDetail,
-    ReplyPorts,
     Stats,
 )
 
-app = FastAPI(title="net-noder API", version="0.1.0")
+app = FastAPI(title="net-noder API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,7 +33,7 @@ _con = None
 
 
 def _cursor():
-    """Lazily open the read-only DB; one shared connection, per-request cursor."""
+    """Lazily open the meta(rw)+analytical(ro) connection; per-request cursor."""
     global _con
     if _con is None:
         try:
@@ -55,14 +56,17 @@ def get_stats():
     return queries.stats(_cursor())
 
 
+@app.get("/api/layers", response_model=list[Layer])
+def get_layers():
+    return queries.layers(_cursor())
+
+
 @app.get("/api/graph", response_model=Graph)
-def get_graph(
-    cap: int = Query(queries.MAX_GRAPH_NODES, ge=1, le=queries.MAX_GRAPH_NODES),
-):
+def get_graph(cap: int = Query(queries.MAX_GRAPH_NODES, ge=1, le=queries.MAX_GRAPH_NODES)):
     return queries.full_graph(_cursor(), cap)
 
 
-@app.get("/api/node/{ip}", response_model=NodeDetail)
+@app.get("/api/node/{ip}", response_model=EndpointDetail)
 def get_node(ip: str):
     d = queries.node_detail(_cursor(), ip)
     if d is None:
@@ -71,35 +75,15 @@ def get_node(ip: str):
 
 
 @app.get("/api/node/{ip}/neighbors", response_model=Graph)
-def get_neighbors(
-    ip: str, metric: str = Query("bytes"), limit: int = Query(50, ge=1, le=2000)
-):
-    return queries.neighbors(_cursor(), ip, metric, limit)
+def get_neighbors(ip: str, limit: int = Query(50, ge=1, le=2000)):
+    return queries.neighbors(_cursor(), ip, limit)
 
 
-@app.get("/api/connection", response_model=ConnectionDetail)
-def get_connection(a: str, b: str):
-    d = queries.connection(_cursor(), a, b)
+@app.get("/api/connection/flows", response_model=ConnectionFlows)
+def get_connection_flows(a: str, b: str):
+    d = queries.connection_flows(_cursor(), a, b)
     if d is None:
         raise HTTPException(404, detail=f"No connection {a} <-> {b}")
-    return d
-
-
-@app.get("/api/conversation/ports", response_model=ReplyPorts)
-def get_conversation_ports(
-    a: str,
-    b: str,
-    proto: str,
-    server_port: int,
-    cast: str,
-    server_is_a: bool,
-    limit: int = Query(50, ge=1, le=500),
-):
-    d = queries.reply_ports(
-        _cursor(), a, b, proto, server_port, cast, server_is_a, limit
-    )
-    if d is None:
-        raise HTTPException(404, detail="No such conversation")
     return d
 
 

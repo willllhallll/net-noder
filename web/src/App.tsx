@@ -2,154 +2,176 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ElementDefinition } from "cytoscape";
 import { api } from "./api";
 import type {
-  ConnectionDetail,
-  Conversation,
-  EdgeConversation,
+  ConnectionFlows,
+  Flow,
   Graph,
   GraphMeta,
   LabelMode,
-  NodeDetail,
-  ReplyPorts,
+  Layer,
+  NodeT,
   Stats,
+  Tier,
 } from "./types";
 import {
-  castColor,
-  convDirection,
-  convLabel,
+  buildLayerLookup,
+  edgeStyle,
   edgeWidth,
   fmtBytes,
   fmtNum,
+  isUnresolved,
+  NEUTRAL_EDGE,
   nodeColor,
   nodeSize,
+  tokenAtTier,
 } from "./format";
 import GraphCanvas from "./components/GraphCanvas";
-import Controls from "./components/Controls";
+import SearchBar from "./components/SearchBar";
+import LayerFilter from "./components/LayerFilter";
 import EndpointPanel from "./components/EndpointPanel";
 import ConnectionPanel from "./components/ConnectionPanel";
+import FlowPanel from "./components/FlowPanel";
 import CapNoticeModal from "./components/CapNoticeModal";
 
 const NEIGHBOR_LIMIT = 40;
 
-function convChip(s: EdgeConversation): string {
-  return s.port == null ? s.proto : `${s.proto}/${s.port}`;
-}
+type LK = ReturnType<typeof buildLayerLookup>;
 
-// Stacked, multi-line label listing the top conversations on a connection edge.
-function edgeLabel(convs: EdgeConversation[], extra: number): string {
-  const lines = convs.map(convChip);
-  if (extra > 0) lines.push(`+${extra} more`);
-  return lines.join("\n");
-}
-
-// Host view: nodes = endpoints, edges = connections (undirected, arrow "none").
+// Base graph (hosts / focus): nodes + NEUTRAL, unlabelled edges. An edge is just
+// "a connection of any type" — protocol detail is revealed only on drill-down.
 function graphToElements(g: Graph): ElementDefinition[] {
   const nodes: ElementDefinition[] = g.nodes.map((n) => ({
     data: {
       id: n.ip,
       ip: n.ip,
       name: n.given_name,
-      label: n.ip, // corrected per labelMode by GraphCanvas
+      label: n.ip, // GraphCanvas corrects this per labelMode
       size: nodeSize(n.total_bytes),
-      color: nodeColor(n.kind, n.is_local),
+      color: nodeColor(n.kind),
     },
   }));
   const edges: ElementDefinition[] = g.edges.map((e) => ({
     data: {
-      id: `e${e.id}`,
-      source: e.source,
-      target: e.target,
+      id: `e${e.connection_id}`,
+      source: e.ip_a,
+      target: e.ip_b,
       weight: edgeWidth(e.bytes),
-      color: castColor(e.cast),
-      label: edgeLabel(e.conversations, e.extra),
-      arrow: "none",
+      color: NEUTRAL_EDGE,
+      // Label the connection with how many flows the pair shares (density at a glance).
+      label: `${e.flow_count}`,
+      opacity: 0.5,
+      lineStyle: "solid",
     },
   }));
   return [...nodes, ...edges];
 }
 
-// Drill-down view: the two endpoints + one directed edge per conversation. Node
-// data is reused from the host graph (both endpoints are present, since the
-// connection edge existed there) so colour/size/label stay consistent.
-function connectionToElements(
-  conn: ConnectionDetail,
-  hostElements: ElementDefinition[]
-): ElementDefinition[] {
-  const nodeById = new Map(
-    hostElements
-      .filter((e) => !(e.data as any).source)
-      .map((e) => [String(e.data!.id), e])
-  );
-  const mkNode = (ip: string, name: string | null): ElementDefinition =>
-    nodeById.get(ip) ?? {
+// Flow-fan view: the two endpoints + one edge PER FLOW (canonical 5-tuple). Each
+// flow edge is coloured by the protocol it carries at the active tier (deepest
+// recovered protocol when no tier is selected). No persistent labels — hundreds of
+// edges rely on colour + the scoped legend; click an arrow for its full stack.
+function flowsToElements(conn: ConnectionFlows, tier: Tier, lk: LK): ElementDefinition[] {
+  const totalBytes = conn.bytes_a2b + conn.bytes_b2a;
+  const nodes: ElementDefinition[] = [
+    {
       data: {
-        id: ip,
-        ip,
-        name,
-        label: ip,
-        size: nodeSize(0),
-        color: nodeColor("unicast", false),
+        id: conn.ip_a, ip: conn.ip_a, name: conn.name_a, label: conn.ip_a,
+        size: nodeSize(totalBytes), color: nodeColor(conn.kind_a),
       },
-    };
-
-  const nodes = [mkNode(conn.ip_a, conn.name_a), mkNode(conn.ip_b, conn.name_b)];
-  const edges: ElementDefinition[] = conn.conversations.map((c, i) => {
-    const dir = convDirection(conn, c);
-    const directed = c.server_is_a != null;
+    },
+    {
+      data: {
+        id: conn.ip_b, ip: conn.ip_b, name: conn.name_b, label: conn.ip_b,
+        size: nodeSize(totalBytes), color: nodeColor(conn.kind_b),
+      },
+    },
+  ];
+  const edges: ElementDefinition[] = conn.flows.map((f) => {
+    const st = edgeStyle(f.layers, tier, lk);
     return {
       data: {
-        id: `c${i}`,
-        // client -> server when directed; otherwise a -> b with no arrowhead.
-        source: directed ? (dir.client as string) : conn.ip_a,
-        target: directed ? (dir.server as string) : conn.ip_b,
-        weight: edgeWidth(c.bytes_a2b + c.bytes_b2a),
-        color: castColor(c.cast_type),
-        label: convLabel(c),
-        arrow: directed ? "triangle" : "none",
-        convIdx: i,
+        id: `f${f.flow_id}`,
+        source: conn.ip_a,
+        target: conn.ip_b,
+        weight: edgeWidth(f.bytes_a2b + f.bytes_b2a),
+        color: st.color,
+        // Label each flow with the protocol it carries at the active tier, so the
+        // colour code has explicit context (blank when the flow has none at the tier).
+        label: st.label,
+        opacity: st.opacity,
+        lineStyle: st.dashed ? "dashed" : "solid",
       },
     };
   });
   return [...nodes, ...edges];
 }
 
-// The endpoint the graph is currently filtered to: its detail + the subgraph of
-// its connections (reused when stepping back from a connection drill-down).
-type Focus = { node: NodeDetail; elements: ElementDefinition[] };
-type View =
+type GraphView =
   | { kind: "hosts" }
-  | { kind: "focus"; focus: Focus }
-  | { kind: "connection"; conn: ConnectionDetail; origin: Focus | null };
-type ConvPorts = ReplyPorts | "loading" | null;
-type SelectedConv = { conv: Conversation; ports: ConvPorts } | null;
+  | { kind: "focus"; node: NodeT; graph: Graph }
+  | { kind: "flows"; conn: ConnectionFlows; from: GraphView };
+type DrawerState =
+  | null
+  | { kind: "connection"; conn: ConnectionFlows }
+  | { kind: "flow"; conn: ConnectionFlows; flow: Flow };
 
 export default function App() {
   const [stats, setStats] = useState<Stats | null>(null);
+  const [layers, setLayers] = useState<Layer[]>([]);
   const [labelMode, setLabelMode] = useState<LabelMode>("ip");
-  const [hostElements, setHostElements] = useState<ElementDefinition[]>([]);
-  const [view, setView] = useState<View>({ kind: "hosts" });
-  const [selectedConv, setSelectedConv] = useState<SelectedConv>(null);
+  const [activeTier, setActiveTier] = useState<Tier>("application");
+  const [hostGraph, setHostGraph] = useState<Graph | null>(null);
+  const [graphView, setGraphView] = useState<GraphView>({ kind: "hosts" });
+  const [drawer, setDrawer] = useState<DrawerState>(null);
   const [capNotice, setCapNotice] = useState<GraphMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const elements = useMemo(() => {
-    if (view.kind === "connection")
-      return connectionToElements(view.conn, view.origin?.elements ?? hostElements);
-    if (view.kind === "focus") return view.focus.elements;
-    return hostElements;
-  }, [view, hostElements]);
+  const lk = useMemo(() => buildLayerLookup(layers), [layers]);
 
-  // Initial host-view load: the full graph (bytes-ranked, capped) + stats.
+  const elements = useMemo(() => {
+    if (graphView.kind === "flows") {
+      return flowsToElements(graphView.conn, activeTier, lk);
+    }
+    const g = graphView.kind === "focus" ? graphView.graph : hostGraph;
+    return g ? graphToElements(g) : [];
+  }, [graphView, hostGraph, activeTier, lk]);
+
+  // Tokens present at the active tier across the visible flows — the scoped legend.
+  const tierLegend = useMemo(() => {
+    if (graphView.kind !== "flows") return [];
+    const seen = new Set<string>();
+    const items: { token: string; colour: string; unresolved: boolean }[] = [];
+    for (const f of graphView.conn.flows) {
+      const tok = tokenAtTier(f.layers, activeTier, lk);
+      if (tok && !seen.has(tok)) {
+        seen.add(tok);
+        items.push({
+          token: tok,
+          colour: lk.map.get(tok)?.colour ?? NEUTRAL_EDGE,
+          unresolved: isUnresolved(tok, lk),
+        });
+      }
+    }
+    return items.sort(
+      (a, b) => (lk.rank.get(a.token) ?? 0) - (lk.rank.get(b.token) ?? 0)
+    );
+  }, [activeTier, graphView, lk]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [s, g] = await Promise.all([api.stats(), api.graph()]);
+        const [s, g, ls] = await Promise.all([
+          api.stats(),
+          api.graph(),
+          api.layers(),
+        ]);
         if (cancelled) return;
         setStats(s);
-        setHostElements(graphToElements(g));
+        setLayers(ls);
+        setHostGraph(g);
         setCapNotice(g.meta?.capped ? g.meta : null);
-        setView({ kind: "hosts" });
-        setSelectedConv(null);
+        setGraphView({ kind: "hosts" });
+        setDrawer(null);
         setError(null);
       } catch (e: any) {
         if (!cancelled) setError(String(e.message ?? e));
@@ -160,100 +182,65 @@ export default function App() {
     };
   }, []);
 
-  // Filter the graph to one endpoint's connections and open its detail drawer.
-  // Shared by node taps and the search picker, and called fresh each time so a
-  // new endpoint fully replaces any existing focus (no drawer stacking).
   const focusNode = useCallback(async (ip: string) => {
     try {
       const [g, node] = await Promise.all([
         api.neighbors(ip, NEIGHBOR_LIMIT),
         api.node(ip),
       ]);
-      setSelectedConv(null);
-      setView({ kind: "focus", focus: { node, elements: graphToElements(g) } });
+      setDrawer(null);
+      setGraphView({ kind: "focus", node, graph: g });
       setError(null);
     } catch (e: any) {
       setError(String(e.message ?? e));
     }
   }, []);
 
-  // Open the side drawer for one conversation, lazily loading its reply ports.
-  const openConversation = useCallback(
-    async (conn: ConnectionDetail, conv: Conversation) => {
-      if (
-        conv.server_port == null ||
-        conv.server_is_a == null ||
-        conv.reply_port_count === 0
-      ) {
-        setSelectedConv({ conv, ports: null });
-        return;
-      }
-      setSelectedConv({ conv, ports: "loading" });
-      try {
-        const ports = await api.replyPorts(
-          conn.ip_a,
-          conn.ip_b,
-          conv.l4_proto,
-          conv.server_port,
-          conv.cast_type,
-          conv.server_is_a
-        );
-        setSelectedConv((cur) =>
-          cur && cur.conv === conv ? { conv, ports } : cur
-        );
-      } catch {
-        setSelectedConv((cur) =>
-          cur && cur.conv === conv ? { conv, ports: null } : cur
-        );
-      }
-    },
-    []
-  );
-
-  // Edge taps mean different things per view: a conversation (drill-down view)
-  // opens its detail in the drawer; a connection (host/focus view) drills down,
-  // remembering the focused endpoint so we can step back to it.
+  // Edge tap dispatches on the current view: in the flow fan, an edge IS a flow;
+  // otherwise it is a connection, which drills into the flow fan + summary drawer.
   const onEdgeTap = useCallback(
     async (data: any) => {
-      if (view.kind === "connection") {
-        const conv = view.conn.conversations[data.convIdx];
-        if (conv) openConversation(view.conn, conv);
+      if (graphView.kind === "flows") {
+        const flow = graphView.conn.flows.find((f) => `f${f.flow_id}` === data.id);
+        if (flow) setDrawer({ kind: "flow", conn: graphView.conn, flow });
         return;
       }
-      const origin = view.kind === "focus" ? view.focus : null;
       try {
-        const conn = await api.connection(data.source, data.target);
-        setSelectedConv(null);
-        setView({ kind: "connection", conn, origin });
+        const conn = await api.connectionFlows(data.source, data.target);
+        setActiveTier("application"); // default the flow view to the application tier
+        setGraphView({ kind: "flows", conn, from: graphView });
+        setDrawer({ kind: "connection", conn });
         setError(null);
       } catch (e: any) {
         setError(String(e.message ?? e));
       }
     },
-    [view, openConversation]
+    [graphView]
   );
 
-  // Connection drawer ← button: step back to where the drill-down was entered.
-  const backToOrigin = useCallback(() => {
-    setSelectedConv(null);
-    setView((v) =>
-      v.kind === "connection" && v.origin
-        ? { kind: "focus", focus: v.origin }
-        : { kind: "hosts" }
-    );
+  // Tapping empty canvas de-selects the current flow: fall back to the connection
+  // summary (the flow drawer should not linger once its edge is unfocused).
+  const onBackgroundTap = useCallback(() => {
+    setDrawer((d) => (d?.kind === "flow" ? { kind: "connection", conn: d.conn } : d));
   }, []);
 
-  // Focus drawer ✕ button: leave the filtered view for the full host graph.
   const exitFocus = useCallback(() => {
-    setSelectedConv(null);
-    setView({ kind: "hosts" });
+    setDrawer(null);
+    setGraphView({ kind: "hosts" });
+  }, []);
+
+  const exitFlows = useCallback(() => {
+    setDrawer(null);
+    setGraphView((gv) => (gv.kind === "flows" ? gv.from : { kind: "hosts" }));
   }, []);
 
   const counts = useMemo(() => {
-    const nodes = elements.filter((e) => !(e.data as any).source).length;
-    const edges = elements.length - nodes;
-    return { nodes, edges };
-  }, [elements]);
+    if (graphView.kind === "flows") {
+      return { nodes: 2, edges: graphView.conn.flow_count };
+    }
+    const g = graphView.kind === "focus" ? graphView.graph : hostGraph;
+    return { nodes: g?.nodes.length ?? 0, edges: g?.edges.length ?? 0 };
+  }, [graphView, hostGraph]);
 
   return (
     <div className="app">
@@ -263,11 +250,12 @@ export default function App() {
           <div className="stat-strip">
             <span>{fmtNum(stats.endpoints)} endpoints</span>
             <span>{fmtNum(stats.connections)} connections</span>
-            <span>{fmtNum(stats.conversations)} conversations</span>
+            <span>{fmtNum(stats.flows)} flows</span>
+            <span>{fmtNum(stats.layers)} protocols</span>
             <span>{fmtBytes(stats.total_bytes)}</span>
           </div>
         )}
-        <Controls
+        <SearchBar
           labelMode={labelMode}
           setLabelMode={setLabelMode}
           onPick={focusNode}
@@ -282,55 +270,50 @@ export default function App() {
           labelMode={labelMode}
           onNodeTap={focusNode}
           onEdgeTap={onEdgeTap}
+          onBackgroundTap={onBackgroundTap}
         />
 
-        {view.kind !== "hosts" && (
+        {graphView.kind === "focus" && (
+          <div className="view-banner">endpoint view · {graphView.node.ip}</div>
+        )}
+        {graphView.kind === "flows" && (
           <div className="view-banner">
-            {view.kind === "connection" ? "connection view" : "endpoint view"}
+            flow view · {graphView.conn.ip_a} ↔ {graphView.conn.ip_b} ·{" "}
+            {fmtNum(graphView.conn.flow_count)} flows
           </div>
         )}
 
-        <div className="legend">
-          <div className="legend-title">
-            showing {counts.nodes} nodes · {counts.edges}{" "}
-            {view.kind === "connection" ? "conversations" : "connections"}
-          </div>
-          <LegendRow color={nodeColor("unicast", true)} label="local host" />
-          <LegendRow color={nodeColor("unicast", false)} label="external host" />
-          <LegendRow color={nodeColor("multicast", false)} label="multicast" />
-          <LegendRow color={nodeColor("broadcast", false)} label="broadcast" />
-          <div className="legend-hint">
-            {view.kind === "connection"
-              ? "click conversation = ports · arrow points client → server"
-              : "click node = focus · click connection = conversations"}
-          </div>
-        </div>
-
-        {view.kind === "focus" && (
-          <EndpointPanel data={view.focus.node} onBack={exitFocus} />
-        )}
-
-        {view.kind === "connection" && (
-          <ConnectionPanel
-            conn={view.conn}
-            conv={selectedConv?.conv ?? null}
-            ports={selectedConv?.ports ?? null}
-            labelMode={labelMode}
-            onBack={backToOrigin}
+        {/* The tier filter lives in the flow view only — it colours the flow arrows. */}
+        {graphView.kind === "flows" && (
+          <LayerFilter
+            activeTier={activeTier}
+            setActiveTier={setActiveTier}
+            tierLegend={tierLegend}
+            nodeCount={counts.nodes}
+            edgeCount={counts.edges}
           />
         )}
+
+        {drawer?.kind === "flow" ? (
+          <FlowPanel
+            conn={drawer.conn}
+            flow={drawer.flow}
+            labelMode={labelMode}
+            lk={lk}
+            onBack={() => setDrawer({ kind: "connection", conn: drawer.conn })}
+          />
+        ) : drawer?.kind === "connection" ? (
+          <ConnectionPanel
+            conn={drawer.conn}
+            labelMode={labelMode}
+            onBack={exitFlows}
+          />
+        ) : graphView.kind === "focus" ? (
+          <EndpointPanel data={graphView.node} onBack={exitFocus} />
+        ) : null}
       </main>
 
       <CapNoticeModal notice={capNotice} onClose={() => setCapNotice(null)} />
-    </div>
-  );
-}
-
-function LegendRow({ color, label }: { color: string; label: string }) {
-  return (
-    <div className="legend-row">
-      <span className="dot" style={{ background: color }} />
-      {label}
     </div>
   );
 }

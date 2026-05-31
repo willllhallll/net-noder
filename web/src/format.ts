@@ -1,3 +1,5 @@
+import type { Layer, Tier } from "./types";
+
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   const u = ["KB", "MB", "GB", "TB", "PB"];
@@ -19,24 +21,20 @@ export function fmtTime(t: number | null): string {
   return new Date(t * 1000).toLocaleString();
 }
 
-// Node colour by role: purple multicast, red broadcast, else blue local / orange
-// external. Mirrors the legend in App.tsx; keep the two in sync.
-export function nodeColor(kind: string, isLocal: boolean): string {
+// Node colour by kind ONLY (no local/remote judgement): multicast purple,
+// broadcast red, unicast sky-blue. Edges are coloured by protocol, not by node.
+export function nodeColor(kind: string): string {
   if (kind === "multicast") return "#a855f7";
   if (kind === "broadcast") return "#ef4444";
-  return isLocal ? "#3b82f6" : "#f59e0b";
+  return "#60a5fa";
 }
 
-// Edge colour flags a multicast/broadcast connection; ordinary unicast is grey.
-export function castColor(cast: string): string {
-  if (cast === "multicast") return "#a855f7";
-  if (cast === "broadcast") return "#ef4444";
-  return "#64748b";
-}
+// Neutral edge colour: used in the default (no-tier) view and for edges with no
+// protocol at the active tier (which also dim out).
+export const NEUTRAL_EDGE = "#64748b";
 
-// Node diameter and edge width scale with the log of bytes (traffic spans many
-// orders of magnitude) and are clamped so the busiest node/edge can't dominate the
-// canvas and the quietest stays visible.
+export const TIER_ORDER: Tier[] = ["link", "network", "transport", "application"];
+
 export function nodeSize(bytes: number): number {
   return Math.max(10, Math.min(60, 8 + 7 * Math.log10(bytes + 10)));
 }
@@ -45,60 +43,104 @@ export function edgeWidth(bytes: number): number {
   return Math.max(1, Math.min(12, 0.5 + 1.6 * Math.log10(bytes + 10)));
 }
 
-import type { Conversation, ConnectionDetail } from "./types";
-
-// Label for one conversation: "tcp/443", or just the proto when no service port.
-export function convLabel(c: { l4_proto: string; server_port: number | null }): string {
-  return c.server_port == null
-    ? c.l4_proto.toLowerCase()
-    : `${c.l4_proto.toLowerCase()}/${c.server_port}`;
+// Build a lookup from the /api/layers response: token -> Layer (tier + colour),
+// plus a rank (its position, which the API returns count-descending) so the most
+// common protocol can be chosen as an edge's representative within a tier.
+export interface LayerLookup {
+  map: Map<string, Layer>;
+  rank: Map<string, number>;
 }
 
-export interface ConvDirection {
-  // null when there's no service port (undirected).
-  client: string | null;
-  server: string | null;
-  // Bytes/pkts split by role; falls back to a<->b when undirected.
-  c2sBytes: number;
-  s2cBytes: number;
-  c2sPkts: number;
-  s2cPkts: number;
+export function buildLayerLookup(layers: Layer[]): LayerLookup {
+  const map = new Map<string, Layer>();
+  const rank = new Map<string, number>();
+  layers.forEach((l, i) => {
+    map.set(l.layer, l);
+    rank.set(l.layer, i);
+  });
+  return { map, rank };
 }
 
-// Resolve client/server endpoints + per-direction volume for a conversation,
-// using server_is_a. server_is_a===true => server is ip_a, client is ip_b, so
-// client->server is the b2a flow; ===false flips it; null => undirected.
-export function convDirection(
-  conn: Pick<ConnectionDetail, "ip_a" | "ip_b">,
-  c: Conversation
-): ConvDirection {
-  if (c.server_is_a === true) {
-    return {
-      client: conn.ip_b,
-      server: conn.ip_a,
-      c2sBytes: c.bytes_b2a,
-      s2cBytes: c.bytes_a2b,
-      c2sPkts: c.pkts_b2a,
-      s2cPkts: c.pkts_a2b,
-    };
+// True for tshark stop-markers ('data') — a payload present but unidentified, i.e.
+// the point where dissection stopped. These are NOT real protocols.
+export function isUnresolved(token: string, lk: LayerLookup): boolean {
+  return lk.map.get(token)?.unresolved ?? token === "data";
+}
+
+function bestByRank(tokens: string[], lk: LayerLookup): string | null {
+  let best: string | null = null;
+  let bestRank = Infinity;
+  for (const t of tokens) {
+    const r = lk.rank.get(t) ?? Infinity;
+    if (r < bestRank) {
+      bestRank = r;
+      best = t;
+    }
   }
-  if (c.server_is_a === false) {
-    return {
-      client: conn.ip_a,
-      server: conn.ip_b,
-      c2sBytes: c.bytes_a2b,
-      s2cBytes: c.bytes_b2a,
-      c2sPkts: c.pkts_a2b,
-      s2cPkts: c.pkts_b2a,
-    };
+  return best;
+}
+
+// The most-specific (highest-tier) RESOLVED token on an edge — its default label.
+// Stop-markers ('data') are skipped so this is always the deepest *recovered*
+// protocol, not the point where identification gave up.
+export function mostSpecific(layers: string[], lk: LayerLookup): string | null {
+  let best: string | null = null;
+  let bestTier = -1;
+  let bestRank = Infinity;
+  for (const t of layers) {
+    if (isUnresolved(t, lk)) continue;
+    const info = lk.map.get(t);
+    const tierIdx = info ? TIER_ORDER.indexOf(info.tier) : -1;
+    const r = lk.rank.get(t) ?? Infinity;
+    if (tierIdx > bestTier || (tierIdx === bestTier && r < bestRank)) {
+      bestTier = tierIdx;
+      bestRank = r;
+      best = t;
+    }
   }
-  // Undirected: no server port. Report raw a->b / b->a volumes.
+  return best;
+}
+
+// The token an edge carries at the active tier — preferring a real protocol, and
+// only falling back to a stop-marker when that is all the tier has.
+export function tokenAtTier(
+  layers: string[],
+  tier: Tier,
+  lk: LayerLookup
+): string | null {
+  const here = layers.filter((t) => lk.map.get(t)?.tier === tier);
+  const real = here.filter((t) => !isUnresolved(t, lk));
+  return bestByRank(real.length ? real : here, lk);
+}
+
+// A flow edge's appearance at the active tier. `dashed` means "this flow carries no
+// protocol at this tier" (drawn neutral grey but visible), NOT an unresolved payload.
+export interface EdgeStyle {
+  color: string;
+  label: string;
+  opacity: number;
+  token: string | null; // the protocol the edge currently represents (its label)
+  dashed: boolean;
+}
+
+export function edgeStyle(
+  layers: string[],
+  activeTier: Tier,
+  lk: LayerLookup
+): EdgeStyle {
+  const tok = tokenAtTier(layers, activeTier, lk);
+  if (!tok) {
+    // No protocol at this tier (e.g. ICMP has no application layer): keep the edge
+    // neutral but VISIBLE — grey dashed, never faded to near-invisible black.
+    return { color: NEUTRAL_EDGE, label: "", opacity: 0.5, token: null, dashed: true };
+  }
+  // Every recovered token — including the 'data' stop-marker — is drawn solid in its
+  // own (non-grey) palette colour: unresolved payload is still real, worthwhile data.
   return {
-    client: null,
-    server: null,
-    c2sBytes: c.bytes_a2b,
-    s2cBytes: c.bytes_b2a,
-    c2sPkts: c.pkts_a2b,
-    s2cPkts: c.pkts_b2a,
+    color: lk.map.get(tok)?.colour ?? NEUTRAL_EDGE,
+    label: tok,
+    opacity: 0.9,
+    token: tok,
+    dashed: false,
   };
 }

@@ -1,14 +1,13 @@
 import type {
-  ConnectionDetail,
+  ConnectionFlows,
   Graph,
-  NodeDetail,
+  Layer,
   NodeT,
-  ReplyPorts,
   Stats,
 } from "./types";
 
-async function get<T>(url: string): Promise<T> {
-  const r = await fetch(url);
+async function req<T>(url: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(url, init);
   if (!r.ok) {
     throw new Error(`${r.status} ${r.statusText}: ${await r.text()}`);
   }
@@ -18,24 +17,13 @@ async function get<T>(url: string): Promise<T> {
 const enc = encodeURIComponent;
 
 export const api = {
-  stats: () => get<Stats>("/api/stats"),
-  graph: () => get<Graph>("/api/graph"),
-  node: (ip: string) => get<NodeDetail>(`/api/node/${enc(ip)}`),
+  stats: () => req<Stats>("/api/stats"),
+  layers: () => req<Layer[]>("/api/layers"),
+  graph: () => req<Graph>("/api/graph"),
+  node: (ip: string) => req<NodeT>(`/api/node/${enc(ip)}`),
   neighbors: (ip: string, limit: number) =>
-    get<Graph>(`/api/node/${enc(ip)}/neighbors?limit=${limit}`),
-  connection: (a: string, b: string) =>
-    get<ConnectionDetail>(`/api/connection?a=${enc(a)}&b=${enc(b)}`),
-  replyPorts: (
-    a: string,
-    b: string,
-    proto: string,
-    serverPort: number,
-    cast: string,
-    serverIsA: boolean
-  ) =>
-    get<ReplyPorts>(
-      `/api/conversation/ports?a=${enc(a)}&b=${enc(b)}&proto=${enc(proto)}` +
-        `&server_port=${serverPort}&cast=${enc(cast)}&server_is_a=${serverIsA}`
-    ),
-  search: (q: string) => get<NodeT[]>(`/api/search?q=${enc(q)}`),
+    req<Graph>(`/api/node/${enc(ip)}/neighbors?limit=${limit}`),
+  connectionFlows: (a: string, b: string) =>
+    req<ConnectionFlows>(`/api/connection/flows?a=${enc(a)}&b=${enc(b)}`),
+  search: (q: string) => req<NodeT[]>(`/api/search?q=${enc(q)}`),
 };

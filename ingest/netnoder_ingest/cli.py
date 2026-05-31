@@ -2,7 +2,13 @@
 
 Resumable: files already extracted (matching size+mtime in the manifest, with their
 shard present) are skipped. Aggregation always rebuilds the rollup tables from all
-current shards.
+current shards. After aggregation the authoritative `tshark -G protocols` reference
+list is persisted into the `protocols` table.
+
+There is one DuckDB store. After aggregation we persist the `tshark -G protocols`
+reference, seed/extend the `layer_colours` registry, and auto-load given-names from
+the names CSV if present. The IANA port map is gone entirely -- the peer/dissector
+model takes protocols straight from the dissector.
 """
 import argparse
 import os
@@ -13,12 +19,22 @@ from pathlib import Path
 
 import duckdb
 
-from . import config, tshark
+from . import config, palette, tshark
 from .aggregate import aggregate
 from .extract import extract_file, shard_path
+from .names import load_names
 
 _SCHEMA = Path(__file__).parent / "schema.sql"
 _PCAP_EXTS = {".pcap", ".pcapng", ".cap"}
+
+# Cleared (and shards removed) by --reset. protocols is re-dumped every run anyway.
+# NOTE: `names` and `layer_colours` are intentionally NOT here -- they are durable
+# metadata that persists across --reset (only lost if the DuckDB file is deleted),
+# so given-names and a token's colour stay stable.
+_RESET_TABLES = (
+    "connection_protocols", "connection_layers", "connections", "endpoints",
+    "flow_layers", "flows", "protocols", "manifest",
+)
 
 
 def connect() -> duckdb.DuckDBPyConnection:
@@ -57,6 +73,15 @@ def _upsert_manifest(con: duckdb.DuckDBPyConnection, r: dict) -> None:
     )
 
 
+def _persist_protocols(con: duckdb.DuckDBPyConnection) -> int:
+    """Dump `tshark -G protocols` into the reference table (validation / tier seeding)."""
+    rows = tshark.dump_protocols()
+    con.execute("DELETE FROM protocols")
+    if rows:
+        con.executemany("INSERT OR REPLACE INTO protocols VALUES (?, ?, ?)", rows)
+    return len(rows)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="netnoder-ingest",
@@ -80,8 +105,7 @@ def main(argv=None) -> int:
     con = connect()
 
     if args.reset:
-        for t in ("conversation_ports", "conversations", "connections",
-                  "endpoints", "manifest"):
+        for t in _RESET_TABLES:
             con.execute(f"DELETE FROM {t}")
         for shard in config.SCRATCH_DIR.glob("*.parquet"):
             shard.unlink()
@@ -110,29 +134,29 @@ def main(argv=None) -> int:
     aggregate(con, memory=args.memory, threads=args.jobs)
     print(f"aggregation done in {time.time() - t0:.1f}s")
 
-    # Refresh given-name labels if a names CSV dir is present (decoupled from packets).
-    from .names import load_names  # lazy import: names.py imports this module
-
+    # Persist the authoritative protocol/abbrev reference list (never drives colour).
     try:
-        n = load_names(con, config.NAMES_DIR)
-        print(f"names loaded: {n} (from {config.NAMES_DIR})")
-    except FileNotFoundError:
-        pass  # no names provided; leave any existing names untouched
+        n = _persist_protocols(con)
+        print(f"protocols reference: {n} entries from `tshark -G protocols`")
+    except RuntimeError as e:
+        print(f"WARNING: could not dump protocols reference: {e}", file=sys.stderr)
 
-    # Refresh the port -> service reference too (also decoupled from packets).
-    from .portmap import load_port_services
+    # Seed/extend the persisted layer-colour registry (first-seen-wins).
+    added = palette.seed_layer_colours(con)
+    print(f"layer colours: +{added} new (registry preserved across runs)")
 
+    # Auto-load given-names from the CSV if present (the CSV is the source of truth).
     try:
-        n = load_port_services(con, config.PORTMAP_PATH)
-        print(f"port services loaded: {n} (from {config.PORTMAP_PATH})")
+        n = load_names(con, config.NAMES_CSV)
+        print(f"names loaded: {n} (from {config.NAMES_CSV})")
     except FileNotFoundError:
-        pass  # no portmap CSV; leave any existing port_services untouched
+        pass  # no names CSV; leave the (preserved) names table as-is
 
-    e, c, s = con.execute(
+    e, c, f = con.execute(
         "SELECT (SELECT count(*) FROM endpoints), "
-        "(SELECT count(*) FROM connections), (SELECT count(*) FROM conversations)"
+        "(SELECT count(*) FROM connections), (SELECT count(*) FROM flows)"
     ).fetchone()
-    print(f"endpoints={e} connections={c} conversations={s}")
+    print(f"endpoints={e} connections={c} flows={f}")
     print(f"DB: {config.DB_PATH}")
     con.close()
     return 0

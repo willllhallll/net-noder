@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netnoder-api"
-version = "0.1.0"
-description = "Local FastAPI server for the net-noder graph explorer"
+version = "0.2.0"
+description = "Local FastAPI server for the net-noder peer/dissector graph explorer"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110",

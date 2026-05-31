@@ -1,188 +1,219 @@
-"""Aggregate all parquet shards into the endpoints/connections/conversations tables.
+"""The *reduce* stage: merge all flow-grain shards and rebuild the derived store.
 
-DuckDB does the heavy GROUP BY out-of-core (spilling to ``temp_directory``), so this
-stays within the RAM budget even for hundreds of millions of packets. Tables are
-rebuilt via DELETE + INSERT to preserve the schema and indexes from schema.sql.
+One DuckDB process reads every parquet shard, merges them to the canonical flow
+grain (`flows` + `flow_layers`), then rebuilds the derived rollups atomically:
+`endpoints`, `connections`, `connection_layers`, `connection_protocols`. Everything
+is recomputed from scratch each run, so there is never an in-place update anomaly.
+
+Bounded RAM: `memory_limit` + a `temp_directory` let the big out-of-core `GROUP BY`
+spill to disk, so the 100s-of-GB corpus merges without blowing memory.
+
+The peer/dissector model is enforced here:
+  * connection_id is assigned per IP-pair, ordered by total bytes (no roles).
+  * protocols come only from the deepest dissected stack (arg_max over depth).
+  * `connection_protocols` is presence-based and strips generic link/net tokens.
+  * `cast_type` is derived from the two endpoints' kinds, never stored per flow.
 """
-import ipaddress
-
 import duckdb
 
 from . import config
-from .transform import CAST_SQL, PROTO_SQL, SERVICE_IS_SRC_SQL
+from .transform import generic_layers_sql, kind_sql, NOISE_TOKEN
 
-# Max reply ports retained per conversation row (top-N by bytes). Bounds the size of
-# conversation_ports; the per-conversation total is still recorded on conversations
-# (reply_port_count).
-_REPLY_KEEP = 50
+# Derived/base tables rebuilt on every aggregation (manifest + protocols are owned
+# by the CLI and intentionally excluded here).
+_REBUILT = (
+    "connection_protocols", "connection_layers", "connections",
+    "endpoints", "flow_layers", "flows",
+)
+
+_GENERIC = generic_layers_sql()
 
 
-def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int = 8) -> None:
-    shard_glob = str(config.SCRATCH_DIR / "*.parquet")
-    n_shards = con.execute("SELECT count(*) FROM glob(?)", [shard_glob]).fetchone()[0]
-    if n_shards == 0:
-        print("No parquet shards found; nothing to aggregate.")
+def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int = 4) -> None:
+    shards = sorted(config.SCRATCH_DIR.glob("*.parquet"))
+    if not shards:
+        print("aggregate: no shards found; nothing to do")
         return
 
-    con.execute(f"SET memory_limit='{memory}'")
-    con.execute(f"SET threads={max(1, threads)}")
-    con.execute(f"SET temp_directory='{config.DATA_DIR}'")
+    tmpdir = config.SCRATCH_DIR / "duckdb_tmp"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    con.execute(f"PRAGMA memory_limit='{memory}'")
+    con.execute(f"PRAGMA threads={max(1, threads)}")
+    con.execute(f"PRAGMA temp_directory='{tmpdir}'")
 
-    # Outer query derives, from the inner query's per-packet service_is_src:
-    #   server_port     - the service endpoint's port.
-    #   reply_port      - the other (replying) side's port. Generalises the old
-    #                     ephemeral client port: many ephemeral ports in a normal
-    #                     client->server flow, or a single service port when both
-    #                     sides talk on service ports.
-    #   server_is_a_row - whether ip_a owns the service port on this packet: ip_a
-    #                     when the service side is the source (a_is_src), else when
-    #                     it's the destination (NOT a_is_src).
+    glob = "'" + str(config.SCRATCH_DIR / "*.parquet").replace("'", "''") + "'"
+
+    # Wipe the rebuilt tables (children first so no dangling references mid-run).
+    for t in _REBUILT:
+        con.execute(f"DELETE FROM {t}")
+
+    # 1. Merge shards to the canonical flow grain, picking the deepest stack globally.
     con.execute(f"""
-        CREATE OR REPLACE TEMP VIEW flows AS
-        SELECT *,
-            CASE WHEN service_is_src IS NULL THEN NULL
-                 WHEN service_is_src THEN src_port ELSE dst_port END AS server_port,
-            CASE WHEN service_is_src IS NULL THEN NULL
-                 WHEN service_is_src THEN dst_port ELSE src_port END AS reply_port,
-            CASE WHEN service_is_src IS NULL THEN NULL
-                 WHEN service_is_src THEN a_is_src ELSE NOT a_is_src END AS server_is_a_row
-        FROM (
-            SELECT
-                src_ip, dst_ip, ts, len, src_port, dst_port,
-                {PROTO_SQL}          AS proto,
-                {CAST_SQL}           AS cast_type,
-                {SERVICE_IS_SRC_SQL} AS service_is_src,
-                LEAST(src_ip, dst_ip)    AS ip_a,
-                GREATEST(src_ip, dst_ip) AS ip_b,
-                (src_ip <= dst_ip)       AS a_is_src
-            FROM read_parquet('{shard_glob}')
-            WHERE src_ip IS NOT NULL AND dst_ip IS NOT NULL
-        )
+        CREATE OR REPLACE TEMP TABLE merged AS
+        SELECT ip_a, ip_b, l4_proto, port_a, port_b,
+               sum(pkts_a2b)  AS pkts_a2b,  sum(bytes_a2b) AS bytes_a2b,
+               sum(pkts_b2a)  AS pkts_b2a,  sum(bytes_b2a) AS bytes_b2a,
+               min(first_seen) AS first_seen, max(last_seen) AS last_seen,
+               arg_max(stack, depth) AS stack
+        FROM read_parquet({glob})
+        GROUP BY ip_a, ip_b, l4_proto, port_a, port_b
     """)
 
-    con.execute("BEGIN")
-    try:
-        con.execute("DELETE FROM conversation_ports")
-        con.execute("DELETE FROM conversations")
-        con.execute("DELETE FROM connections")
-        con.execute("DELETE FROM endpoints")
+    # 2. Assign connection_id per IP-pair, ranked by total bytes (heaviest = 1).
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE conn_geo AS
+        SELECT ip_a, ip_b,
+               row_number() OVER (
+                   ORDER BY sum(bytes_a2b + bytes_b2a) DESC, ip_a, ip_b
+               ) AS connection_id
+        FROM merged
+        GROUP BY ip_a, ip_b
+    """)
 
-        con.execute("""
-            INSERT INTO connections
-            SELECT
-                row_number() OVER (ORDER BY (bytes_a2b + bytes_b2a) DESC) AS id,
-                ip_a, ip_b, pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, first_seen, last_seen
-            FROM (
-                SELECT ip_a, ip_b,
-                    SUM(CASE WHEN a_is_src THEN 1   ELSE 0 END) AS pkts_a2b,
-                    SUM(CASE WHEN a_is_src THEN len ELSE 0 END) AS bytes_a2b,
-                    SUM(CASE WHEN a_is_src THEN 0   ELSE 1 END) AS pkts_b2a,
-                    SUM(CASE WHEN a_is_src THEN 0 ELSE len END) AS bytes_b2a,
-                    MIN(ts) AS first_seen, MAX(ts) AS last_seen
-                FROM flows GROUP BY ip_a, ip_b
-            )
-        """)
+    # 3. Surrogate flow_id per merged 5-tuple; keep ip pair + stack for the explode.
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE flows_tmp AS
+        SELECT row_number() OVER (
+                   ORDER BY g.connection_id, m.l4_proto, m.port_a, m.port_b
+               ) AS flow_id,
+               g.connection_id, g.ip_a, g.ip_b,
+               m.l4_proto, m.port_a, m.port_b,
+               m.pkts_a2b, m.bytes_a2b, m.pkts_b2a, m.bytes_b2a,
+               m.first_seen, m.last_seen, m.stack
+        FROM merged m JOIN conn_geo g USING (ip_a, ip_b)
+    """)
 
-        # Per-conversation directional rollup, keyed by the service endpoint
-        # (server_port + server_is_a) so a service port shared by both ends yields
-        # two directional rows. server_is_a is deterministic per packet, so it's a
-        # plain group key here.
-        con.execute("""
-            INSERT INTO conversations
-            SELECT c.id, f.proto, f.server_port, f.cast_type,
-                   SUM(CASE WHEN f.a_is_src THEN 1   ELSE 0 END) AS pkts_a2b,
-                   SUM(CASE WHEN f.a_is_src THEN f.len ELSE 0 END) AS bytes_a2b,
-                   SUM(CASE WHEN f.a_is_src THEN 0   ELSE 1 END) AS pkts_b2a,
-                   SUM(CASE WHEN f.a_is_src THEN 0 ELSE f.len END) AS bytes_b2a,
-                   COUNT(DISTINCT f.reply_port) AS reply_port_count,
-                   f.server_is_a_row AS server_is_a,
-                   MIN(f.ts) AS first_seen, MAX(f.ts) AS last_seen
-            FROM flows f
-            JOIN connections c USING (ip_a, ip_b)
-            GROUP BY c.id, f.proto, f.server_port, f.cast_type, f.server_is_a_row
-        """)
+    # 4. flows fact (stack + geo dropped -- they live in flow_layers / connections).
+    con.execute("""
+        INSERT INTO flows
+        SELECT flow_id, connection_id, l4_proto, port_a, port_b,
+               pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, first_seen, last_seen
+        FROM flows_tmp
+    """)
 
-        # Finest-grain breakdown (per reply port), materialised once for the top-N
-        # ports rollup so it doesn't rescan the parquet.
-        con.execute("DROP TABLE IF EXISTS conv_full")
-        con.execute("""
-            CREATE TEMP TABLE conv_full AS
-            SELECT ip_a, ip_b, proto, server_port, cast_type, server_is_a_row, reply_port,
-                   SUM(CASE WHEN a_is_src THEN 1   ELSE 0 END) AS pkts_a2b,
-                   SUM(CASE WHEN a_is_src THEN len ELSE 0 END) AS bytes_a2b,
-                   SUM(CASE WHEN a_is_src THEN 0   ELSE 1 END) AS pkts_b2a,
-                   SUM(CASE WHEN a_is_src THEN 0 ELSE len END) AS bytes_b2a
-            FROM flows
-            GROUP BY ip_a, ip_b, proto, server_port, cast_type, server_is_a_row, reply_port
-        """)
+    # 5. Explode the stack into one row per layer. Drop the 'ethertype' noise token,
+    #    then re-index contiguously per flow preserving the original stack order.
+    #    (Two same-length UNNESTs in one projection zip positionally in DuckDB.)
+    con.execute(f"""
+        INSERT INTO flow_layers
+        WITH exploded AS (
+            SELECT flow_id,
+                   unnest(string_split(stack, ':')) AS layer,
+                   unnest(range(0, len(string_split(stack, ':')))) AS orig_pos
+            FROM flows_tmp
+            WHERE stack IS NOT NULL AND stack <> ''
+        )
+        SELECT flow_id,
+               CAST(row_number() OVER (PARTITION BY flow_id ORDER BY orig_pos) - 1
+                    AS SMALLINT) AS layer_index,
+               layer
+        FROM exploded
+        WHERE layer <> '' AND layer <> '{NOISE_TOKEN}'
+    """)
 
-        # Top-N reply ports per conversation (by total bytes).
-        con.execute(f"""
-            INSERT INTO conversation_ports
-            SELECT c.id, f.proto, f.server_port, f.cast_type, f.server_is_a_row,
-                   f.reply_port, f.pkts_a2b, f.bytes_a2b, f.pkts_b2a, f.bytes_b2a
-            FROM (
-                SELECT *, row_number() OVER (
-                           PARTITION BY ip_a, ip_b, proto, server_port, cast_type,
-                                        server_is_a_row
-                           ORDER BY (bytes_a2b + bytes_b2a) DESC) AS rk
-                FROM conv_full
-                WHERE reply_port IS NOT NULL
-            ) f
-            JOIN connections c USING (ip_a, ip_b)
-            WHERE f.rk <= {_REPLY_KEEP}
-        """)
+    # 6. endpoints: each flow contributes to BOTH of its IPs (all its packets touch
+    #    each endpoint). degree = distinct peers. kind = uni/multi/bcast by IP only.
+    con.execute(f"""
+        INSERT INTO endpoints
+        WITH contrib AS (
+            SELECT ip_a AS ip, ip_b AS peer,
+                   pkts_a2b + pkts_b2a AS pk, bytes_a2b + bytes_b2a AS byts,
+                   first_seen, last_seen FROM merged
+            UNION ALL
+            SELECT ip_b AS ip, ip_a AS peer,
+                   pkts_a2b + pkts_b2a AS pk, bytes_a2b + bytes_b2a AS byts,
+                   first_seen, last_seen FROM merged
+        )
+        SELECT ip,
+               sum(pk) AS total_pkts,
+               sum(byts) AS total_bytes,
+               min(first_seen) AS first_seen,
+               max(last_seen)  AS last_seen,
+               {kind_sql('ip')} AS kind,
+               count(DISTINCT peer) AS degree
+        FROM contrib
+        GROUP BY ip
+    """)
 
-        con.execute("""
-            INSERT INTO endpoints
-            SELECT ip,
-                   SUM(pkts) AS total_pkts, SUM(bytes) AS total_bytes,
-                   MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen,
-                   FALSE, 'unicast', NULL
-            FROM (
-                SELECT src_ip AS ip, COUNT(*) pkts, SUM(len) bytes,
-                       MIN(ts) first_seen, MAX(ts) last_seen
-                FROM flows GROUP BY src_ip
-                UNION ALL
-                SELECT dst_ip AS ip, COUNT(*) pkts, SUM(len) bytes,
-                       MIN(ts) first_seen, MAX(ts) last_seen
-                FROM flows GROUP BY dst_ip
-            ) GROUP BY ip
-        """)
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
+    # 7. connection_protocols (edge-click view): presence-based per (conn, layer, l4),
+    #    generic link/net tokens stripped. Measures and distinct-port counts are
+    #    computed in separate passes -- unnesting ports inline would double the sums.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE cp_measures AS
+        SELECT f.connection_id, fl.layer, f.l4_proto,
+               sum(f.pkts_a2b) AS pkts_a2b, sum(f.bytes_a2b) AS bytes_a2b,
+               sum(f.pkts_b2a) AS pkts_b2a, sum(f.bytes_b2a) AS bytes_b2a,
+               min(f.first_seen) AS first_seen, max(f.last_seen) AS last_seen
+        FROM flows f JOIN flow_layers fl ON fl.flow_id = f.flow_id
+        WHERE fl.layer NOT IN {_GENERIC}
+        GROUP BY f.connection_id, fl.layer, f.l4_proto
+    """)
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE cp_ports AS
+        SELECT f.connection_id, fl.layer, f.l4_proto,
+               count(DISTINCT p.port) AS port_count
+        FROM flows f JOIN flow_layers fl ON fl.flow_id = f.flow_id,
+             UNNEST([f.port_a, f.port_b]) AS p(port)
+        WHERE fl.layer NOT IN {_GENERIC} AND p.port IS NOT NULL
+        GROUP BY f.connection_id, fl.layer, f.l4_proto
+    """)
+    con.execute("""
+        INSERT INTO connection_protocols
+        SELECT m.connection_id, m.layer, m.l4_proto,
+               m.pkts_a2b, m.bytes_a2b, m.pkts_b2a, m.bytes_b2a,
+               coalesce(p.port_count, 0), m.first_seen, m.last_seen
+        FROM cp_measures m
+        LEFT JOIN cp_ports p USING (connection_id, layer, l4_proto)
+    """)
 
-    _classify_endpoints(con)
+    # 8. connection_layers: the FULL distinct stack per connection (generics kept),
+    #    for the graph's 4-tier stepper.
+    con.execute("""
+        INSERT INTO connection_layers
+        SELECT DISTINCT f.connection_id, fl.layer
+        FROM flows f JOIN flow_layers fl ON fl.flow_id = f.flow_id
+    """)
 
+    # 9. connections: per-direction counters summed from flows; distinct-port count;
+    #    distinct protocol-layer count; cast_type derived from the endpoints' kinds.
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE conn_meas AS
+        SELECT connection_id,
+               sum(pkts_a2b) AS pkts_a2b, sum(bytes_a2b) AS bytes_a2b,
+               sum(pkts_b2a) AS pkts_b2a, sum(bytes_b2a) AS bytes_b2a,
+               min(first_seen) AS first_seen, max(last_seen) AS last_seen
+        FROM flows GROUP BY connection_id
+    """)
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE conn_ports AS
+        SELECT f.connection_id, count(DISTINCT p.port) AS port_count
+        FROM flows f, UNNEST([f.port_a, f.port_b]) AS p(port)
+        WHERE p.port IS NOT NULL
+        GROUP BY f.connection_id
+    """)
+    con.execute("""
+        INSERT INTO connections
+        SELECT g.connection_id, g.ip_a, g.ip_b,
+               cm.pkts_a2b, cm.bytes_a2b, cm.pkts_b2a, cm.bytes_b2a,
+               CASE
+                   WHEN ea.kind = 'broadcast' OR eb.kind = 'broadcast' THEN 'broadcast'
+                   WHEN ea.kind = 'multicast' OR eb.kind = 'multicast' THEN 'multicast'
+                   ELSE 'unicast'
+               END AS cast_type,
+               coalesce(pc.protocol_count, 0) AS protocol_count,
+               coalesce(cp.port_count, 0)     AS port_count,
+               cm.first_seen, cm.last_seen
+        FROM conn_geo g
+        JOIN conn_meas cm ON cm.connection_id = g.connection_id
+        JOIN endpoints ea ON ea.ip = g.ip_a
+        JOIN endpoints eb ON eb.ip = g.ip_b
+        LEFT JOIN conn_ports cp ON cp.connection_id = g.connection_id
+        LEFT JOIN (
+            SELECT connection_id, count(DISTINCT layer) AS protocol_count
+            FROM connection_protocols GROUP BY connection_id
+        ) pc ON pc.connection_id = g.connection_id
+    """)
 
-def _classify_endpoints(con: duckdb.DuckDBPyConnection) -> None:
-    """Set is_local + kind on endpoints using Python's ipaddress (small table)."""
-    extra_nets = []
-    for cidr in config.EXTRA_LOCAL_SUBNETS:
-        try:
-            extra_nets.append(ipaddress.ip_network(cidr, strict=False))
-        except ValueError:
-            pass
-
-    ips = [r[0] for r in con.execute("SELECT ip FROM endpoints").fetchall()]
-    updates = [(*_classify_ip(ip, extra_nets), ip) for ip in ips]
-    if updates:
-        con.executemany("UPDATE endpoints SET kind=?, is_local=? WHERE ip=?", updates)
-
-
-def _classify_ip(ip: str, extra_nets) -> tuple[str, bool]:
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return "unicast", False
-    if addr.version == 4 and ip == "255.255.255.255":
-        return "broadcast", False
-    if addr.is_multicast:
-        return "multicast", False
-    is_local = (
-        addr.is_private or addr.is_loopback or addr.is_link_local
-        or any(addr in n for n in extra_nets)
-    )
-    return "unicast", bool(is_local)
+    for t in ("merged", "conn_geo", "flows_tmp", "cp_measures", "cp_ports",
+              "conn_meas", "conn_ports"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
