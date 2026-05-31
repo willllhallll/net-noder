@@ -5,14 +5,12 @@ data/*
 !data/captures/
 data/captures/*
 !data/captures/.gitkeep
-# Keep the names/ dir + a headers-only template, but not real name CSVs.
-!data/names/
-data/names/*
-!data/names/names.example.csv
-# Keep the portmap/ dir + a headers-only template, but not the real registry CSV.
-!data/portmap/
-data/portmap/*
-!data/portmap/portmap.example.csv
+# Keep the ingest scratch dir in the tree, but not the temp shards inside it.
+!data/scratch/
+data/scratch/*
+!data/scratch/.gitkeep
+# Keep a headers-only given-names template, but not the real names.csv.
+!data/names.example.csv
 *.duckdb
 *.duckdb.wal
 *.parquet
