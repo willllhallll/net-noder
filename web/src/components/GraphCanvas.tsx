@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import cytoscape, { Core, ElementDefinition } from "cytoscape";
 import fcose from "cytoscape-fcose";
-import type { LabelMode } from "../types";
+import type { LabelOpts } from "../types";
+import { resolveLabel } from "../format";
 
 cytoscape.use(fcose);
 
@@ -47,6 +48,8 @@ const STYLE: any[] = [
       // Per-edge opacity drives the tier filter: edges with no protocol at the
       // active tier are nearly transparent ("dimmed out").
       opacity: "data(opacity)",
+      // Two-line label (protocol over ×count), wrapped on the embedded newline and
+      // centred together mid-edge.
       label: "data(label)",
       "font-size": 6,
       "line-height": 1.15,
@@ -77,9 +80,9 @@ const STYLE: any[] = [
   },
 ];
 
-// The right-side drawer (320px) overlays the canvas; leave a margin past it so the
-// flow view's content is never centred underneath it.
-const DRAWER_W = 360;
+// The right-side drawer overlays the canvas; leave a margin past it (matching the
+// drawer's max width in styles.css) so the flow view's content is never centred under it.
+const DRAWER_W = 380;
 
 function layoutFor(nodeCount: number): any {
   const big = nodeCount > 1500;
@@ -88,7 +91,10 @@ function layoutFor(nodeCount: number): any {
     quality: big ? "draft" : "default",
     animate: !big,
     animationDuration: 500,
-    randomize: false,
+    // Seed from random positions: freshly-added nodes all sit at the origin, and
+    // fcose can't separate coincident nodes from a cold start (they collapse to a
+    // diagonal line). Randomising guarantees the spread-out layout on first paint.
+    randomize: true,
     fit: true,
     padding: 40,
     nodeRepulsion: 9000,
@@ -103,10 +109,13 @@ function layoutFor(nodeCount: number): any {
 function placeFlowNodes(cy: Core): void {
   const nodes = cy.nodes();
   if (nodes.length !== 2) return;
-  const lensHalf = Math.max(FLOW_STEP, ((cy.edges().length - 1) * FLOW_STEP) / 2);
+  const lensHalf = Math.max(
+    FLOW_STEP,
+    ((cy.edges().length - 1) * FLOW_STEP) / 2,
+  );
   const gap = Math.max(220, lensHalf * 1.3); // a bit narrower than the fan is tall
   nodes[0].position({ x: -gap / 2, y: 0 }); // ip_a (left)
-  nodes[1].position({ x: gap / 2, y: 0 });  // ip_b (right)
+  nodes[1].position({ x: gap / 2, y: 0 }); // ip_b (right)
 }
 
 // Fit the flow-fan into the visible region to the LEFT of the drawer, so the
@@ -121,7 +130,7 @@ function fitFlowView(cy: Core): void {
   if (bb.w === 0 || bb.h === 0) return;
   const zoom = Math.max(
     0.05,
-    Math.min((avail - 2 * pad) / bb.w, (H - 2 * pad) / bb.h, 3.5)
+    Math.min((avail - 2 * pad) / bb.w, (H - 2 * pad) / bb.h, 3.5),
   );
   cy.zoom(zoom);
   // Centre the content within the available (left-of-drawer) region.
@@ -133,19 +142,19 @@ function fitFlowView(cy: Core): void {
 
 interface Props {
   elements: ElementDefinition[];
-  labelMode: LabelMode;
+  labelOpts: LabelOpts;
   onNodeTap: (ip: string) => void;
   onEdgeTap: (data: any) => void;
   onBackgroundTap?: () => void;
 }
 
-function nodeLabel(d: any, mode: LabelMode): string {
-  return mode === "name" && d.name ? d.name : d.ip;
+function nodeLabel(d: any, opts: LabelOpts): string {
+  return resolveLabel(opts, d.name ?? null, d.whois ?? null, d.ip);
 }
 
 export default function GraphCanvas({
   elements,
-  labelMode,
+  labelOpts,
   onNodeTap,
   onEdgeTap,
   onBackgroundTap,
@@ -220,9 +229,9 @@ export default function GraphCanvas({
     const cy = cyRef.current;
     if (!cy) return;
     cy.nodes().forEach((n) => {
-      n.data("label", nodeLabel(n.data(), labelMode));
+      n.data("label", nodeLabel(n.data(), labelOpts));
     });
-  }, [labelMode, elements]);
+  }, [labelOpts, elements]);
 
   return <div ref={containerRef} className="graph" />;
 }

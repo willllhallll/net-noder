@@ -1,17 +1,17 @@
 import { useState } from "react";
 import { api } from "../api";
-import type { LabelMode, NodeT } from "../types";
+import type { LabelOpts, NodeT } from "../types";
 import { fmtBytes, nodeColor } from "../format";
 
 interface Props {
-  labelMode: LabelMode;
-  setLabelMode: (m: LabelMode) => void;
+  labelOpts: LabelOpts;
+  setLabelOpts: (m: LabelOpts) => void;
   onPick: (ip: string) => void;
 }
 
-// Top-bar control: the IP/name label toggle + endpoint search (IP prefix or name
-// substring). Picking a result focuses that endpoint.
-export default function SearchBar({ labelMode, setLabelMode, onPick }: Props) {
+// Top-bar control: two independent label toggles (given name / WHOIS name) + endpoint
+// search (IP prefix, given-name or WHOIS-name substring). Picking a result focuses it.
+export default function SearchBar({ labelOpts, setLabelOpts, onPick }: Props) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<NodeT[]>([]);
   const [busy, setBusy] = useState(false);
@@ -34,16 +34,27 @@ export default function SearchBar({ labelMode, setLabelMode, onPick }: Props) {
 
   return (
     <div className="controls">
-      <label className="field">
+      <div className="field">
         <span>Labels</span>
-        <select
-          value={labelMode}
-          onChange={(e) => setLabelMode(e.target.value as LabelMode)}
-        >
-          <option value="ip">IP</option>
-          <option value="name">Given name</option>
-        </select>
-      </label>
+        <div className="label-toggles">
+          <label className="label-toggle">
+            <input
+              type="checkbox"
+              checked={labelOpts.given}
+              onChange={(e) => setLabelOpts({ ...labelOpts, given: e.target.checked })}
+            />
+            Given name
+          </label>
+          <label className="label-toggle">
+            <input
+              type="checkbox"
+              checked={labelOpts.whois}
+              onChange={(e) => setLabelOpts({ ...labelOpts, whois: e.target.checked })}
+            />
+            WHOIS name
+          </label>
+        </div>
+      </div>
 
       <div className="field search">
         <span>Find endpoint</span>
@@ -67,10 +78,15 @@ export default function SearchBar({ labelMode, setLabelMode, onPick }: Props) {
                   setQ("");
                 }}
               >
-                <span className="dot" style={{ background: nodeColor(r.kind) }} />
+                <span className="dot" style={{ background: nodeColor(r) }} />
                 {r.given_name ? (
                   <>
                     <strong>{r.given_name}</strong>
+                    <span className="muted"> {r.ip}</span>
+                  </>
+                ) : r.whois_name ? (
+                  <>
+                    <strong>{r.whois_name}</strong>
                     <span className="muted"> {r.ip}</span>
                   </>
                 ) : (

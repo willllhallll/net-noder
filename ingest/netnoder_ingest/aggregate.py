@@ -10,7 +10,11 @@ spill to disk, so the 100s-of-GB corpus merges without blowing memory.
 
 The peer/dissector model is enforced here:
   * connection_id is assigned per IP-pair, ordered by total bytes (no roles).
-  * protocols come only from the deepest dissected stack (arg_max over depth).
+  * protocols are a PRESENCE set merged across every frame of the flow (each token at
+    its first-appearance position), never a single deepest frame -- so a deeply-parsed
+    TLS 1.2 certificate cannot shadow the flow's real protocol identity.
+  * the per-flow `protocol_version` (decoded in extract from whatever version each present
+    protocol exposes -- TLS/DTLS/QUIC/HTTP/NTP) rides through to `flows.protocol_version`.
   * `connection_protocols` is presence-based and strips generic link/net tokens.
   * `cast_type` is derived from the two endpoints' kinds, never stored per flow.
 """
@@ -47,14 +51,18 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
     for t in _REBUILT:
         con.execute(f"DELETE FROM {t}")
 
-    # 1. Merge shards to the canonical flow grain, picking the deepest stack globally.
+    # 1. Merge shards to the canonical flow grain. Measures sum; the per-shard token
+    #    presence lists (each {token,pos}) concatenate -- the union of distinct tokens
+    #    with their global min position is taken later, per flow. The already-decoded
+    #    protocol_version label (one value per flow) carries through unchanged.
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE merged AS
         SELECT ip_a, ip_b, l4_proto, port_a, port_b,
                sum(pkts_a2b)  AS pkts_a2b,  sum(bytes_a2b) AS bytes_a2b,
                sum(pkts_b2a)  AS pkts_b2a,  sum(bytes_b2a) AS bytes_b2a,
                min(first_seen) AS first_seen, max(last_seen) AS last_seen,
-               arg_max(stack, depth) AS stack
+               max(protocol_version) AS protocol_version,
+               flatten(list(tokens) FILTER (WHERE tokens IS NOT NULL)) AS tokens
         FROM read_parquet({glob})
         GROUP BY ip_a, ip_b, l4_proto, port_a, port_b
     """)
@@ -70,7 +78,8 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
         GROUP BY ip_a, ip_b
     """)
 
-    # 3. Surrogate flow_id per merged 5-tuple; keep ip pair + stack for the explode.
+    # 3. Surrogate flow_id per merged 5-tuple; keep ip pair, the token presence list,
+    #    and the raw TLS version code for the steps below.
     con.execute("""
         CREATE OR REPLACE TEMP TABLE flows_tmp AS
         SELECT row_number() OVER (
@@ -79,36 +88,76 @@ def aggregate(con: duckdb.DuckDBPyConnection, memory: str = "4GB", threads: int 
                g.connection_id, g.ip_a, g.ip_b,
                m.l4_proto, m.port_a, m.port_b,
                m.pkts_a2b, m.bytes_a2b, m.pkts_b2a, m.bytes_b2a,
-               m.first_seen, m.last_seen, m.stack
+               m.first_seen, m.last_seen, m.protocol_version, m.tokens
         FROM merged m JOIN conn_geo g USING (ip_a, ip_b)
     """)
 
-    # 4. flows fact (stack + geo dropped -- they live in flow_layers / connections).
+    # 4. flows fact (tokens + geo dropped -- they live in flow_layers / connections).
+    #    protocol_version is already a decoded label from extract; carried straight through.
     con.execute("""
         INSERT INTO flows
         SELECT flow_id, connection_id, l4_proto, port_a, port_b,
-               pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, first_seen, last_seen
+               pkts_a2b, bytes_a2b, pkts_b2a, bytes_b2a, first_seen, last_seen,
+               protocol_version
         FROM flows_tmp
     """)
 
-    # 5. Explode the stack into one row per layer. Drop the 'ethertype' noise token,
-    #    then re-index contiguously per flow preserving the original stack order.
-    #    (Two same-length UNNESTs in one projection zip positionally in DuckDB.)
+    # 5. Explode the token presence list into one row per layer. Each shard already
+    #    deduped per token (carrying that shard's first position), so taking min(pos)
+    #    here yields the global first-appearance position; re-index contiguously per
+    #    flow in that order. Drop the 'ethertype' noise token + any empties. Because the
+    #    'tls' token always precedes any certificate ASN.1 tokens, adding/removing those
+    #    cert tokens never moves an earlier token's index -- the de-noise cut stays stable.
+    #
+    #    Some flows carry NO usable frame.protocols stack (e.g. IGMP/ICMP/ICMPv6 and
+    #    bare ip-proto flows, where tshark emitted an empty protocols column): they would
+    #    otherwise get zero flow_layers rows, leaving the flow view with a blank stack
+    #    (and previously a null layer in the API). For those, synthesize a minimal stack
+    #    from the IP family + the L4 token (eth > ip|ipv6 > <l4>), skipping the non-protocol
+    #    l4 tokens ('other' and the 'ip/<n>' fallbacks) which name no real layer.
     con.execute(f"""
         INSERT INTO flow_layers
         WITH exploded AS (
+            SELECT flow_id, tok.token AS layer, tok.pos AS pos
+            FROM (
+                SELECT flow_id, unnest(tokens) AS tok
+                FROM flows_tmp
+                WHERE tokens IS NOT NULL AND len(tokens) > 0
+            )
+        ),
+        deduped AS (
+            SELECT flow_id, layer, min(pos) AS pos
+            FROM exploded
+            WHERE layer <> '' AND layer <> '{NOISE_TOKEN}'
+            GROUP BY flow_id, layer
+        ),
+        real_layers AS (
             SELECT flow_id,
-                   unnest(string_split(stack, ':')) AS layer,
-                   unnest(range(0, len(string_split(stack, ':')))) AS orig_pos
-            FROM flows_tmp
-            WHERE stack IS NOT NULL AND stack <> ''
+                   CAST(row_number() OVER (PARTITION BY flow_id ORDER BY pos, layer) - 1
+                        AS SMALLINT) AS layer_index,
+                   layer
+            FROM deduped
+        ),
+        synth AS (
+            SELECT flow_id,
+                   unnest(layers) AS layer,
+                   CAST(unnest(range(0, len(layers))) AS SMALLINT) AS layer_index
+            FROM (
+                SELECT flow_id,
+                       list_filter(
+                           ['eth',
+                            CASE WHEN contains(ip_a, ':') THEN 'ipv6' ELSE 'ip' END,
+                            CASE WHEN l4_proto <> 'other' AND l4_proto NOT LIKE 'ip/%'
+                                 THEN l4_proto END],
+                           x -> x IS NOT NULL
+                       ) AS layers
+                FROM flows_tmp
+                WHERE flow_id NOT IN (SELECT flow_id FROM deduped)
+            )
         )
-        SELECT flow_id,
-               CAST(row_number() OVER (PARTITION BY flow_id ORDER BY orig_pos) - 1
-                    AS SMALLINT) AS layer_index,
-               layer
-        FROM exploded
-        WHERE layer <> '' AND layer <> '{NOISE_TOKEN}'
+        SELECT flow_id, layer_index, layer FROM real_layers
+        UNION ALL
+        SELECT flow_id, layer_index, layer FROM synth
     """)
 
     # 6. endpoints: each flow contributes to BOTH of its IPs (all its packets touch

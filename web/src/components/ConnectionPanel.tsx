@@ -1,53 +1,81 @@
 import { useMemo } from "react";
-import type { ConnectionFlows, LabelMode } from "../types";
-import { fmtBytes, fmtNum, nodeColor } from "../format";
+import type { ConnectionStacks, LabelOpts, Tier } from "../types";
+import type { LayerLookup } from "../format";
+import {
+  edgeStyle,
+  fmtBytes,
+  fmtNum,
+  mostSpecific,
+  nodeColor,
+  resolveLabel,
+  TIER_ORDER,
+} from "../format";
 import Drawer from "./Drawer";
+import PortColumn, { PortChip } from "./PortColumn";
 
 interface Props {
-  conn: ConnectionFlows;
-  labelMode: LabelMode;
+  conn: ConnectionStacks;
+  labelOpts: LabelOpts;
+  activeTier: Tier;
+  lk: LayerLookup;
   onBack: () => void;
 }
 
-// Distinct, sorted ports observed on one side of the 5-tuples (peer-to-peer: just
-// "the ports this endpoint used", no direction, no IANA service interpretation).
-function distinctPorts(ports: (number | null)[]): number[] {
-  return Array.from(
-    new Set(ports.filter((p): p is number => p != null))
-  ).sort((a, b) => a - b);
+// Collapse one side's per-stack port lists into a single colour-coded chip list. Each
+// port takes the colour of the stack it belongs to AT THE ACTIVE TIER -- the same
+// edgeStyle the flow arrows use -- so the column recolours in lock-step with the graph
+// when the tier filter steps. A port seen under several stacks keeps the most-specific
+// (highest-tier) one's colour, so the chip matches the busiest/deepest arrow it sits on.
+function colourPorts(
+  stacks: ConnectionStacks["stacks"],
+  side: "ports_a" | "ports_b",
+  activeTier: Tier,
+  lk: LayerLookup
+): PortChip[] {
+  const best = new Map<number, { colour: string; tier: number }>();
+  for (const st of stacks) {
+    const colour = edgeStyle(st.layers, activeTier, lk).color;
+    const top = mostSpecific(st.layers, lk);
+    const tier = top ? TIER_ORDER.indexOf(lk.map.get(top)?.tier ?? "link") : -1;
+    for (const port of st[side]) {
+      const prev = best.get(port);
+      if (!prev || tier > prev.tier) best.set(port, { colour, tier });
+    }
+  }
+  return Array.from(best.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([port, v]) => ({ port, colour: v.colour }));
 }
 
-// The intermediate flows-summary drawer (edge clicked, no individual flow chosen
-// yet): the A <-> B pair with neutral packet/byte utilisation, plus every 5-tuple
-// port in use on each side. The protocol stack is deliberately omitted here — the
-// user explores that by clicking individual flow arrows.
-export default function ConnectionPanel({ conn, labelMode, onBack }: Props) {
-  const label = (name: string | null, ip: string) =>
-    labelMode === "name" && name ? name : ip;
-  const A = label(conn.name_a, conn.ip_a);
-  const B = label(conn.name_b, conn.ip_b);
+// The whole-connection overview (edge clicked, no stack chosen yet): neutral A<->B
+// volumes plus every port in use on each side, colour-coded to the stack it belongs to.
+// The protocol stacks themselves are explored by clicking the grouped flow arrows.
+export default function ConnectionPanel({ conn, labelOpts, activeTier, lk, onBack }: Props) {
+  const A = resolveLabel(labelOpts, conn.name_a, conn.whois_name_a, conn.ip_a);
+  const B = resolveLabel(labelOpts, conn.name_b, conn.whois_name_b, conn.ip_b);
 
   const portsA = useMemo(
-    () => distinctPorts(conn.flows.map((f) => f.port_a)),
-    [conn.flows]
+    () => colourPorts(conn.stacks, "ports_a", activeTier, lk),
+    [conn.stacks, activeTier, lk]
   );
   const portsB = useMemo(
-    () => distinctPorts(conn.flows.map((f) => f.port_b)),
-    [conn.flows]
+    () => colourPorts(conn.stacks, "ports_b", activeTier, lk),
+    [conn.stacks, activeTier, lk]
   );
 
   return (
     <Drawer onBack={onBack} backIcon="✕">
       <h2>
-        <span className="dot" style={{ background: nodeColor(conn.kind_a) }} />
+        <span className="dot" style={{ background: nodeColor({ kind: conn.kind_a }) }} />
         {A}
         <span className="conv-arrow">↔</span>
         {B}
-        <span className="dot" style={{ background: nodeColor(conn.kind_b) }} />
+        <span className="dot" style={{ background: nodeColor({ kind: conn.kind_b }) }} />
       </h2>
 
       <div className="badges">
         <span className="badge">{fmtNum(conn.flow_count)} flows</span>
+        <span className="badge">{fmtNum(conn.stacks.length)} stacks</span>
       </div>
 
       <table className="kv">
@@ -65,32 +93,13 @@ export default function ConnectionPanel({ conn, labelMode, onBack }: Props) {
 
       <h3>Ports in use</h3>
       <div className="proto-hint muted">
-        Every 5-tuple port observed on each side. Click a flow arrow for its full
-        stack &amp; the exact port pair.
+        Every port observed on each side, coloured by the stack it carries. Click a flow
+        arrow for that stack&apos;s full breadcrumb.
       </div>
       <div className="port-cols">
         <PortColumn label={A} ports={portsA} />
         <PortColumn label={B} ports={portsB} />
       </div>
     </Drawer>
-  );
-}
-
-function PortColumn({ label, ports }: { label: string; ports: number[] }) {
-  return (
-    <div className="port-col">
-      <div className="port-col-head">
-        {label} <span className="muted">({fmtNum(ports.length)})</span>
-      </div>
-      <div className="port-col-body">
-        {ports.length === 0 ? (
-          <span className="muted">—</span>
-        ) : (
-          ports.map((p) => (
-            <span key={p} className="port-chip">:{p}</span>
-          ))
-        )}
-      </div>
-    </div>
   );
 }

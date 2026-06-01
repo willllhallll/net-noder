@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db, queries
 from .models import (
-    ConnectionFlows,
+    Category,
+    ConnectionStacks,
     EndpointDetail,
     Graph,
     Layer,
@@ -61,6 +62,11 @@ def get_layers():
     return queries.layers(_cursor())
 
 
+@app.get("/api/categories", response_model=list[Category])
+def get_categories():
+    return queries.categories(_cursor())
+
+
 @app.get("/api/graph", response_model=Graph)
 def get_graph(cap: int = Query(queries.MAX_GRAPH_NODES, ge=1, le=queries.MAX_GRAPH_NODES)):
     return queries.full_graph(_cursor(), cap)
@@ -75,13 +81,16 @@ def get_node(ip: str):
 
 
 @app.get("/api/node/{ip}/neighbors", response_model=Graph)
-def get_neighbors(ip: str, limit: int = Query(50, ge=1, le=2000)):
+def get_neighbors(
+    ip: str,
+    limit: int = Query(queries.MAX_GRAPH_NODES, ge=1, le=queries.MAX_GRAPH_NODES),
+):
     return queries.neighbors(_cursor(), ip, limit)
 
 
-@app.get("/api/connection/flows", response_model=ConnectionFlows)
-def get_connection_flows(a: str, b: str):
-    d = queries.connection_flows(_cursor(), a, b)
+@app.get("/api/connection/stacks", response_model=ConnectionStacks)
+def get_connection_stacks(a: str, b: str):
+    d = queries.connection_stacks(_cursor(), a, b)
     if d is None:
         raise HTTPException(404, detail=f"No connection {a} <-> {b}")
     return d

@@ -26,6 +26,24 @@ DB_PATH = Path(os.environ.get("NETNODER_DB", str(DATA_DIR / "netnoder.duckdb")))
 # CSV source of truth for user given-names (header: ip,given_name). Auto-loaded by
 # ingest if present; also loadable on its own via `netnoder-names`.
 NAMES_CSV = Path(os.environ.get("NETNODER_NAMES", str(DATA_DIR / "names.csv"))).resolve()
+# CSV source of truth for VLAN definitions (header: vlan_id,base_ip,subnet_mask[,label]).
+# Auto-loaded by ingest if present; also loadable on its own via `netnoder-vlans`.
+VLANS_CSV = Path(os.environ.get("NETNODER_VLANS", str(DATA_DIR / "vlans.csv"))).resolve()
+
+# RDAP/WHOIS name resolution: globally-routable IPs are looked up against ARIN's RDAP
+# registry at ingest and cached (with a TTL) in the `ip_whois` table. Tunables:
+#   WHOIS_ENABLED        - master switch for the auto-resolve step in `netnoder-ingest`.
+#   WHOIS_TTL_DAYS       - re-resolve a successful row once it is older than this.
+#   WHOIS_ERROR_TTL_DAYS - retry a failed/empty row sooner than a successful one.
+#   WHOIS_MIN_DELAY      - minimum seconds between requests (politeness/rate-limit).
+#   WHOIS_TIMEOUT        - per-request socket timeout in seconds.
+#   WHOIS_MAX_RETRIES    - retries on 429/503/network errors (with backoff) per IP.
+WHOIS_ENABLED = os.environ.get("NETNODER_WHOIS", "true").lower() in ("1", "true", "yes")
+WHOIS_TTL_DAYS = int(os.environ.get("NETNODER_WHOIS_TTL_DAYS", "30"))
+WHOIS_ERROR_TTL_DAYS = int(os.environ.get("NETNODER_WHOIS_ERROR_TTL_DAYS", "7"))
+WHOIS_MIN_DELAY = float(os.environ.get("NETNODER_WHOIS_MIN_DELAY", "0.5"))
+WHOIS_TIMEOUT = float(os.environ.get("NETNODER_WHOIS_TIMEOUT", "5.0"))
+WHOIS_MAX_RETRIES = int(os.environ.get("NETNODER_WHOIS_MAX_RETRIES", "3"))
 
 
 def ensure_dirs() -> None:

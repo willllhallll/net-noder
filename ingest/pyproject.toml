@@ -12,6 +12,9 @@ dependencies = ["duckdb>=1.1"]
 [project.scripts]
 netnoder-ingest = "netnoder_ingest.cli:main"
 netnoder-names = "netnoder_ingest.names:main"
+netnoder-vlans = "netnoder_ingest.vlans:main"
+netnoder-whois = "netnoder_ingest.whois:main"
+netnoder-colors = "netnoder_ingest.colors:main"
 
 [tool.setuptools]
 packages = ["netnoder_ingest"]

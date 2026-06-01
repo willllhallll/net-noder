@@ -89,6 +89,31 @@ input,
   width: 90px;
 }
 
+/* The two independent label toggles (given name / WHOIS name) in the top bar. */
+.label-toggles {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.label-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.label-toggle input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
 .search-row {
   display: flex;
   gap: 6px;
@@ -141,7 +166,8 @@ input,
 }
 
 .legend,
-.layer-filter {
+.layer-filter,
+.vlan-filter {
   position: absolute;
   left: 12px;
   bottom: 12px;
@@ -151,6 +177,44 @@ input,
   padding: 10px 12px;
   font-size: 12px;
   max-width: 240px;
+}
+
+/* VLAN/category filter (hosts view): a select-all button + one checkbox row per
+   ingested category. Shares the bottom-left slot with the flow-view tier filter. */
+.select-all-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  margin: 4px 0 8px;
+}
+
+.select-all-btn:hover {
+  border-color: var(--accent);
+}
+
+.cat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.cat-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 1px 0;
+  cursor: pointer;
+}
+
+.cat-row input {
+  margin: 0;
+  cursor: pointer;
 }
 
 /* Tier stepper: the headline layer filter */
@@ -324,11 +388,15 @@ table.kv {
 table.kv td {
   padding: 4px 6px;
   border-bottom: 1px solid var(--border);
+  /* Long names / IPv6 addresses in the label column would otherwise force the
+     row wider than the drawer and trigger an x-scroll; break them mid-token so
+     the row wraps and the value column stays visible. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 table.kv td:first-child {
   color: var(--muted);
-  white-space: nowrap;
 }
 
 /* Reply ports */
@@ -361,7 +429,7 @@ table.kv td:first-child {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 320px;
+  width: min(380px, calc(100vw - 24px));
   z-index: 30;
   background: var(--panel);
   border-left: 1px solid var(--border);
@@ -371,11 +439,14 @@ table.kv td:first-child {
 }
 
 .conv-drawer h2 {
-  margin: 0 28px 10px 0;
+  margin: 0 32px 10px 0;
   font-size: 16px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  word-break: break-all;
   font-family: ui-monospace, monospace;
 }
 
@@ -395,6 +466,10 @@ table.kv td:first-child {
   margin-bottom: 12px;
   font-family: ui-monospace, monospace;
   font-size: 13px;
+  /* A bare IPv6 address is a single unbreakable token; let it break so it never
+     spills past the drawer edge. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .conv-arrow {
@@ -458,22 +533,55 @@ table.kv td:first-child {
   text-overflow: ellipsis;
 }
 
-.port-col-body {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+.port-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+}
+
+.port-search::placeholder {
+  color: var(--muted);
+}
+
+/* Windowed chip grid: a fixed-height scroller holding an absolutely-positioned grid,
+   so only the rows in view are mounted (port churn can mean 10k+ chips per side). */
+.port-col-vbody {
+  position: relative;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.port-col-empty {
   padding: 8px;
-  max-height: 280px;
-  overflow: auto;
+  font-size: 11px;
 }
 
 .port-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
   font-family: ui-monospace, monospace;
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--panel-2);
   border: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.port-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
 }
 
 /* Flow drawer: the protocol stack breadcrumb (eth › ip › tcp › tls …). */
@@ -515,39 +623,21 @@ table.kv td:first-child {
   opacity: 0.85;
 }
 
+/* The TLS/SSL boundary chip: the negotiated-version badge + a lock marking sealed payload. */
+.flow-chip-ver {
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 0.75;
+}
+
+.flow-chip-lock {
+  font-size: 10px;
+  line-height: 1;
+}
+
 .flow-chip-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
-}
-
-/* Flow drawer: the 5-tuple ports, one per endpoint, no direction. */
-.flow-ports {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin: 4px 0 10px;
-}
-
-.flow-port {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.flow-port-num {
-  font-family: ui-monospace, monospace;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.flow-port-sep {
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
-  color: var(--muted);
 }

@@ -1,5 +1,6 @@
 import type {
-  ConnectionFlows,
+  Category,
+  ConnectionStacks,
   Graph,
   Layer,
   NodeT,
@@ -19,11 +20,14 @@ const enc = encodeURIComponent;
 export const api = {
   stats: () => req<Stats>("/api/stats"),
   layers: () => req<Layer[]>("/api/layers"),
+  categories: () => req<Category[]>("/api/categories"),
   graph: () => req<Graph>("/api/graph"),
   node: (ip: string) => req<NodeT>(`/api/node/${enc(ip)}`),
-  neighbors: (ip: string, limit: number) =>
-    req<Graph>(`/api/node/${enc(ip)}/neighbors?limit=${limit}`),
-  connectionFlows: (a: string, b: string) =>
-    req<ConnectionFlows>(`/api/connection/flows?a=${enc(a)}&b=${enc(b)}`),
+  neighbors: (ip: string, limit?: number) =>
+    req<Graph>(
+      `/api/node/${enc(ip)}/neighbors${limit != null ? `?limit=${limit}` : ""}`,
+    ),
+  connectionStacks: (a: string, b: string) =>
+    req<ConnectionStacks>(`/api/connection/stacks?a=${enc(a)}&b=${enc(b)}`),
   search: (q: string) => req<NodeT[]>(`/api/search?q=${enc(q)}`),
 };

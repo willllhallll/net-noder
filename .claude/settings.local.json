@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m netnoder_ingest.cli data/captures/sample.pcap --reset)"
+      "Bash(python -m netnoder_ingest.cli data/captures/sample.pcap --reset)",
+      "Bash(git rm *)",
+      "Bash(bash scripts/dev.sh)",
+      "Bash(bash scripts/stop.sh)"
     ]
   }
 }

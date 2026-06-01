@@ -1,4 +1,18 @@
-import type { Layer, Tier } from "./types";
+import type { LabelOpts, Layer, Tier } from "./types";
+
+// Resolve a node/endpoint label from the two independent toggles: a user given-name wins
+// when enabled and present, then the RDAP WHOIS name when enabled and present, otherwise
+// the raw IP. With both toggles off this is always the IP.
+export function resolveLabel(
+  opts: LabelOpts,
+  given: string | null,
+  whois: string | null,
+  ip: string
+): string {
+  if (opts.given && given) return given;
+  if (opts.whois && whois) return whois;
+  return ip;
+}
 
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -21,11 +35,14 @@ export function fmtTime(t: number | null): string {
   return new Date(t * 1000).toLocaleString();
 }
 
-// Node colour by kind ONLY (no local/remote judgement): multicast purple,
-// broadcast red, unicast sky-blue. Edges are coloured by protocol, not by node.
-export function nodeColor(kind: string): string {
-  if (kind === "multicast") return "#a855f7";
-  if (kind === "broadcast") return "#ef4444";
+// Node colour by VLAN/subnet CATEGORY, served per-node as `colour` (from the
+// vlan_colours registry). Flow-view nodes come from ConnectionStacks (no category),
+// so we keep the old kind-based fallback: multicast purple, broadcast red, else
+// sky-blue. Edges are coloured by protocol, not by node.
+export function nodeColor(n: { colour?: string; kind: string }): string {
+  if (n.colour) return n.colour;
+  if (n.kind === "multicast") return "#a855f7";
+  if (n.kind === "broadcast") return "#ef4444";
   return "#60a5fa";
 }
 
@@ -65,6 +82,37 @@ export function buildLayerLookup(layers: Layer[]): LayerLookup {
 // the point where dissection stopped. These are NOT real protocols.
 export function isUnresolved(token: string, lk: LayerLookup): boolean {
   return lk.map.get(token)?.unresolved ?? token === "data";
+}
+
+// True for the TLS/SSL session boundary token — the layer at which payload becomes
+// sealed (the de-noise cut also keys on it). The UI badges these with a 🔒.
+export function isEncrypted(token: string, lk: LayerLookup): boolean {
+  return lk.map.get(token)?.encrypted ?? false;
+}
+
+// Compact form of a protocol-version label for a chip badge: "TLS 1.3" → "1.3",
+// "HTTP/1.1" → "1.1", "QUIC v1" → "v1"; an undecoded code passes through whole.
+export function shortVersion(version: string | null): string | null {
+  if (!version) return null;
+  const slash = version.lastIndexOf("/");
+  if (slash >= 0) return version.slice(slash + 1);
+  const space = version.lastIndexOf(" ");
+  if (space >= 0) return version.slice(space + 1);
+  return version;
+}
+
+// The stack token a `protocol_version` label belongs to, so the badge lands on the right
+// chip (display-only — never used for identity/grouping). "TLS 1.3"→tls, "HTTP/1.1"→http,
+// "QUIC v1"→quic, "DTLS 1.2"→dtls, "NTPv4"→ntp.
+export function versionOwnerToken(version: string | null): string | null {
+  if (!version) return null;
+  const v = version.toLowerCase();
+  if (v.startsWith("tls") || v.startsWith("ssl")) return "tls";
+  if (v.startsWith("dtls")) return "dtls";
+  if (v.startsWith("quic")) return "quic";
+  if (v.startsWith("http")) return "http";
+  if (v.startsWith("ntp")) return "ntp";
+  return null;
 }
 
 function bestByRank(tokens: string[], lk: LayerLookup): string | null {

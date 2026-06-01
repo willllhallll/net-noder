@@ -15,6 +15,8 @@ ingest, **first-seen-wins**: anchors are seeded once (seq = -1) and each new obs
 token takes the next unused slot and keeps it. It is preserved across re-aggregation
 and --reset, so a token's colour never changes within the life of a store.
 """
+import random
+
 import duckdb
 
 TIER_ORDER = ("link", "network", "transport", "application")
@@ -40,6 +42,13 @@ ANCHORS: dict[str, str] = {
 
 # Tokens that are dissection STOP markers, not real protocols.
 UNRESOLVED: frozenset[str] = frozenset({"data"})
+
+# tshark's encryption-boundary tokens -- the layer at which the dissector hands off to a
+# sealed channel (and from which the negotiated version is read). The de-noise cut keys on
+# this `encrypted` flag (NOT the literal string 'tls'), so it applies uniformly to every
+# TLS-family boundary; marking it also lets the UI badge the chip with a 🔒. It never names
+# any certificate/ASN.1 token, so the cert-cascade acceptance test is unaffected.
+ENCRYPTED: frozenset[str] = frozenset({"tls", "ssl", "dtls"})
 
 # Curated tier map for common tokens (includes the anchors). Anything not listed is
 # tiered by its modal layer_index via tier_for().
@@ -79,6 +88,214 @@ PALETTE: tuple[str, ...] = (
     "#ffd740", "#84ffff", "#ff8a80", "#8c9eff", "#a7ffeb", "#ff9e80",
     "#cfff95", "#ea80fc", "#80d8ff", "#ffe57f",
 )
+
+
+# --- VLAN / endpoint-category colours -----------------------------------------
+# A dedicated palette for VLAN categories, DISJOINT from the protocol ANCHORS +
+# PALETTE above so a VLAN colour can never be confused with a protocol colour. These
+# were generated golden-angle in a distinct saturation/lightness band (muted mids,
+# vs. the protocol palette's vivid hues) and verified collision-free against both
+# protocol sets. Drawn in vlan_id allocation order; past its length the same band's
+# golden-angle generator continues (see colour_for_vlan_seq).
+VLAN_PALETTE: tuple[str, ...] = (
+    "#c87541", "#2e9e7a", "#c341c8", "#819e2e", "#417ec8", "#9e2e40",
+    "#41c853", "#5e2e9e", "#c8a241", "#2e9d9e", "#c8419f", "#5c9e2e",
+    "#4151c8", "#9e422e", "#41c880", "#832e9e",
+)
+
+# The fixed (non-VLAN) endpoint categories and their curated colours (seq = -1).
+# 'public'/'unassigned' get fresh hues; 'multicast'/'broadcast' deliberately match
+# the web's previous kind-based nodeColor so those nodes keep their familiar look.
+FIXED_CATEGORY_COLOURS: dict[str, str] = {
+    "public":     "#43a047",  # green
+    "unassigned": "#78909c",  # blue-grey
+    "multicast":  "#a855f7",  # purple (matches the old kind-based nodeColor)
+    "broadcast":  "#ef4444",  # red    (matches the old kind-based nodeColor)
+}
+FIXED_CATEGORY_LABELS: dict[str, str] = {
+    "public":     "Public",
+    "unassigned": "Unassigned",
+    "multicast":  "Multicast",
+    "broadcast":  "Broadcast",
+}
+# Display order for the fixed categories (VLANs sort ahead of these by vlan_id).
+FIXED_CATEGORY_ORDER: tuple[str, ...] = ("public", "unassigned", "multicast", "broadcast")
+
+
+# --- Shake-up schemes ----------------------------------------------------------
+# The stable ingest seeding (seed_layer_colours / seed_vlan_colours) is never touched
+# by any of this; these power the on-demand `netnoder-colors` re-allocation only.
+#
+# Generated schemes step hue by the golden angle and alternate two lightnesses for
+# adjacent-slot contrast. Each is (saturation, light_a, light_b, hue_lo, hue_span):
+# vivid/pastel span the full wheel; warm/cool constrain hues to an arc. The random
+# start within the arc comes from the seed, so a seed fully determines the result.
+_SCHEME_BANDS: dict[str, tuple[float, float, float, float, float]] = {
+    "vivid":  (0.78, 0.46, 0.58,   0.0, 360.0),  # punchy, full-wheel
+    "pastel": (0.42, 0.74, 0.82,   0.0, 360.0),  # soft, light, full-wheel
+    "warm":   (0.70, 0.48, 0.60, -25.0, 130.0),  # reds → oranges → yellows
+    "cool":   (0.60, 0.46, 0.58, 150.0, 160.0),  # greens → cyans → blues
+}
+
+# `shuffle` reuses the curated palettes in a seed-shuffled order; the rest are generated.
+SCHEMES: tuple[str, ...] = ("shuffle",) + tuple(_SCHEME_BANDS)
+
+
+def generate_palette(n: int, scheme: str, seed: int, *, base, overflow) -> list[str]:
+    """Return `n` hex colours for a re-allocation `scheme` (member of SCHEMES).
+
+    `shuffle` draws from a seed-shuffled copy of `base` (a curated palette), using
+    `overflow(i)` for any slot past its length. The generated schemes ignore
+    `base`/`overflow` and lay colours out golden-angle within their `_SCHEME_BANDS`.
+    """
+    if n <= 0:
+        return []
+    rnd = random.Random(seed)
+    if scheme == "shuffle":
+        pool = list(base)
+        rnd.shuffle(pool)
+        return [pool[i] if i < len(pool) else overflow(i) for i in range(n)]
+    sat, la, lb, hue_lo, span = _SCHEME_BANDS[scheme]
+    start = rnd.random() * span
+    return [
+        _hsl_to_hex((hue_lo + (start + i * 137.508) % span) % 360,
+                    sat, la if i % 2 == 0 else lb)
+        for i in range(n)
+    ]
+
+
+def regenerate_layer_colours(
+    con: duckdb.DuckDBPyConnection, *, scheme: str, seed: int, keep_anchors: bool
+) -> int:
+    """Wipe `layer_colours` and re-allocate it with a fresh `scheme` (a deliberate
+    'shake up' of the otherwise-stable registry). Token order mirrors the seeder —
+    anchors first, then observed tokens busiest-first — so a normal re-ingest
+    afterwards is a no-op (the rows already exist). Returns rows written.
+
+    With `keep_anchors` the curated ANCHORS keep their colour (seq = -1) and only the
+    long tail is recoloured; otherwise every token, anchors included, is recoloured.
+    """
+    observed = con.execute(
+        """SELECT layer, mode(layer_index) AS modal_index
+           FROM flow_layers GROUP BY layer ORDER BY count(*) DESC, layer"""
+    ).fetchall()
+    modal = {layer: mi for layer, mi in observed}
+    anchors = list(ANCHORS)
+    tail = [layer for layer, _ in observed if layer not in ANCHORS]
+    order = anchors + tail
+
+    if keep_anchors:
+        gen = generate_palette(len(tail), scheme, seed, base=PALETTE, overflow=colour_for_seq)
+        colours = dict(ANCHORS)
+        seqs = {layer: -1 for layer in anchors}
+        for i, layer in enumerate(tail):
+            colours[layer], seqs[layer] = gen[i], i
+    else:
+        gen = generate_palette(len(order), scheme, seed, base=PALETTE, overflow=colour_for_seq)
+        colours = {layer: gen[i] for i, layer in enumerate(order)}
+        seqs = {layer: i for i, layer in enumerate(order)}
+
+    con.execute("DELETE FROM layer_colours")
+    for layer in order:
+        con.execute(
+            "INSERT INTO layer_colours VALUES (?, ?, ?, ?, ?, ?)",
+            [layer, tier_for(layer, modal.get(layer)), colours[layer], seqs[layer],
+             layer in UNRESOLVED, layer in ENCRYPTED],
+        )
+    return len(order)
+
+
+def regenerate_vlan_colours(
+    con: duckdb.DuckDBPyConnection, *, scheme: str, seed: int, keep_anchors: bool
+) -> int:
+    """Wipe `vlan_colours` and re-allocate it with a fresh `scheme`; analogous to
+    regenerate_layer_colours. Fixed categories sort ahead of defined VLANs (vlan_id
+    order) and labels are preserved. The seed is offset so generated VLAN hues land
+    away from the protocol hues (best-effort; exact disjointness only holds for the
+    curated `shuffle` palettes). Returns rows written."""
+    vlan_rows = con.execute("SELECT vlan_id, label FROM vlans ORDER BY vlan_id").fetchall()
+    fixed = list(FIXED_CATEGORY_ORDER)
+    vlan_keys = [f"vlan_{vid}" for vid, _ in vlan_rows]
+    order = fixed + vlan_keys
+    labels = {f"vlan_{vid}": (lbl or f"VLAN {vid}") for vid, lbl in vlan_rows}
+    labels.update(FIXED_CATEGORY_LABELS)
+
+    vseed = (seed ^ 0x5A5A5A5A) & 0xFFFFFFFF
+    if keep_anchors:
+        gen = generate_palette(len(vlan_keys), scheme, vseed,
+                               base=VLAN_PALETTE, overflow=colour_for_vlan_seq)
+        colours = dict(FIXED_CATEGORY_COLOURS)
+        seqs = {key: -1 for key in fixed}
+        for i, key in enumerate(vlan_keys):
+            colours[key], seqs[key] = gen[i], i
+    else:
+        gen = generate_palette(len(order), scheme, vseed,
+                               base=VLAN_PALETTE, overflow=colour_for_vlan_seq)
+        colours = {key: gen[i] for i, key in enumerate(order)}
+        seqs = {key: i for i, key in enumerate(order)}
+
+    con.execute("DELETE FROM vlan_colours")
+    for key in order:
+        con.execute(
+            "INSERT INTO vlan_colours VALUES (?, ?, ?, ?)",
+            [key, labels[key], colours[key], seqs[key]],
+        )
+    return len(order)
+
+
+def colour_for_vlan_seq(seq: int) -> str:
+    """Colour for VLAN allocation slot `seq` (0-based), unbounded.
+
+    Within the curated `VLAN_PALETTE` it returns the hand-verified hue; past its end
+    it continues the same muted-mid band golden-angle so colours stay distinct and the
+    scheme never runs out (very large VLAN counts are rare but supported)."""
+    if 0 <= seq < len(VLAN_PALETTE):
+        return VLAN_PALETTE[seq]
+    hue = (seq * 137.508 + 23) % 360
+    light = 0.52 if seq % 2 == 0 else 0.40
+    return _hsl_to_hex(hue, 0.55, light)
+
+
+def seed_vlan_colours(con: duckdb.DuckDBPyConnection) -> int:
+    """Seed/extend `vlan_colours` for the fixed categories + each defined VLAN.
+
+    First-seen-wins: the four fixed categories are inserted once (seq = -1) and each
+    `vlans.vlan_id` not already present takes the next unused VLAN slot and keeps it.
+    Existing rows are never touched, so a category's colour is stable across ingests.
+    Returns rows newly added."""
+    added = 0
+    # Fixed categories first (idempotent).
+    for key in FIXED_CATEGORY_ORDER:
+        before = con.execute(
+            "SELECT 1 FROM vlan_colours WHERE category_key = ?", [key]
+        ).fetchone()
+        con.execute(
+            "INSERT OR IGNORE INTO vlan_colours VALUES (?, ?, ?, -1)",
+            [key, FIXED_CATEGORY_LABELS[key], FIXED_CATEGORY_COLOURS[key]],
+        )
+        if not before:
+            added += 1
+
+    # Each defined VLAN, in vlan_id order, takes the next free slot.
+    vlan_rows = con.execute(
+        "SELECT vlan_id, label FROM vlans ORDER BY vlan_id"
+    ).fetchall()
+    for vlan_id, label in vlan_rows:
+        key = f"vlan_{vlan_id}"
+        if con.execute(
+            "SELECT 1 FROM vlan_colours WHERE category_key = ?", [key]
+        ).fetchone():
+            continue
+        slot = con.execute(
+            "SELECT coalesce(max(seq), -1) + 1 FROM vlan_colours WHERE seq >= 0"
+        ).fetchone()[0]
+        name = label if label else f"VLAN {vlan_id}"
+        con.execute(
+            "INSERT INTO vlan_colours VALUES (?, ?, ?, ?)",
+            [key, name, colour_for_vlan_seq(slot), slot],
+        )
+        added += 1
+    return added
 
 
 def tier_for(layer: str, modal_index: int | None) -> str:
@@ -131,8 +348,9 @@ def seed_layer_colours(con: duckdb.DuckDBPyConnection) -> int:
     # Anchors first (idempotent).
     for layer, colour in ANCHORS.items():
         con.execute(
-            "INSERT OR IGNORE INTO layer_colours VALUES (?, ?, ?, -1, ?)",
-            [layer, TIER_MAP.get(layer, "application"), colour, layer in UNRESOLVED],
+            "INSERT OR IGNORE INTO layer_colours VALUES (?, ?, ?, -1, ?, ?)",
+            [layer, TIER_MAP.get(layer, "application"), colour,
+             layer in UNRESOLVED, layer in ENCRYPTED],
         )
 
     # Observed tokens with their modal stack position, busiest first.
@@ -153,9 +371,9 @@ def seed_layer_colours(con: duckdb.DuckDBPyConnection) -> int:
             "SELECT coalesce(max(seq), -1) + 1 FROM layer_colours WHERE seq >= 0"
         ).fetchone()[0]
         con.execute(
-            "INSERT INTO layer_colours VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO layer_colours VALUES (?, ?, ?, ?, ?, ?)",
             [layer, tier_for(layer, modal_index), colour_for_seq(nxt), nxt,
-             layer in UNRESOLVED],
+             layer in UNRESOLVED, layer in ENCRYPTED],
         )
         added += 1
     return added

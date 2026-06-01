@@ -31,13 +31,20 @@ CREATE TABLE IF NOT EXISTS flows (
     pkts_b2a      BIGINT,
     bytes_b2a     BIGINT,
     first_seen    DOUBLE,               -- epoch seconds
-    last_seen     DOUBLE
+    last_seen     DOUBLE,
+    protocol_version VARCHAR            -- decoded version label of the flow's most-specific
+                                        -- versioned protocol (TLS/DTLS/QUIC/HTTP/NTP),
+                                        -- NULL when none was decodable
     -- alternate key (unique by construction): (connection_id, l4_proto, port_a, port_b)
 );
 
--- The dissected stack for each flow: the deepest frame.protocols seen for the
--- 5-tuple, split into one token per layer (generic 'ethertype' noise dropped, then
--- re-indexed contiguously). layer_index is the position in the stack (0=link).
+-- The dissected stack for each flow: the PRESENCE set of frame.protocols tokens seen
+-- across ALL the flow's packets (not a single deepest frame -- that shadowed real
+-- protocols), each at its first-appearance position (generic 'ethertype' noise
+-- dropped, then re-indexed contiguously). layer_index is the position in the stack
+-- (0=link). The full set is retained for fidelity; the TLS-boundary de-noise cut (drop
+-- tokens after 'tls') is applied at query time, leaving this table stable when a
+-- certificate gains/loses an ASN.1 element.
 CREATE TABLE IF NOT EXISTS flow_layers (
     flow_id     BIGINT,
     layer_index SMALLINT,
@@ -127,7 +134,43 @@ CREATE TABLE IF NOT EXISTS layer_colours (
     tier       VARCHAR,                -- 'link'|'network'|'transport'|'application'
     colour     VARCHAR,                -- hex
     seq        INTEGER,                -- -1 for curated anchors; >=0 long-tail order
-    unresolved BOOLEAN                 -- TRUE for tshark stop-markers ('data')
+    unresolved BOOLEAN,                -- TRUE for tshark stop-markers ('data')
+    encrypted  BOOLEAN                 -- TRUE for tshark's TLS/SSL session boundary
+                                       -- token (sealed payload lives here, 🔒)
+);
+
+-- Machine-resolved IP -> RDAP "name" (org/netblock handle, e.g. 'AMAZON-CF'), looked up
+-- from ARIN's RDAP registry (https://rdap.arin.net/registry/ip/<ip>) at ingest and cached
+-- with a TTL. Distinct from `names` (user-curated, wholesale-replaced from a CSV): this is
+-- machine-generated, negative-cacheable, and refreshed per-row once `resolved_at` ages past
+-- the TTL. Joined to nodes at query time. PRESERVED across --reset like the other metadata.
+CREATE TABLE IF NOT EXISTS ip_whois (
+    ip          VARCHAR PRIMARY KEY,
+    name        VARCHAR,               -- RDAP "name"; NULL when none was found
+    status      VARCHAR,               -- 'ok' | 'notfound' | 'error'
+    resolved_at TIMESTAMP              -- when last attempted (drives TTL refresh)
+);
+
+-- User-curated VLAN definitions, loaded from vlans.csv by `netnoder-vlans` (or the
+-- auto-load step in `netnoder-ingest`). The source of truth for endpoint subnet
+-- classification at query time. PRESERVED across --reset like names/layer_colours --
+-- only lost if the DuckDB file itself is deleted.
+CREATE TABLE IF NOT EXISTS vlans (
+    vlan_id     INTEGER PRIMARY KEY,
+    base_ip     VARCHAR,               -- '10.200.0.0'
+    subnet_mask VARCHAR,               -- '255.255.255.0'
+    label       VARCHAR                -- optional friendly name; NULL -> 'VLAN <id>'
+);
+
+-- Persisted category -> colour registry, first-seen-wins. The fixed categories get
+-- curated colours (seq = -1); each vlan_id takes the next VLAN_PALETTE slot once and
+-- keeps it (seq >= 0). Seeded/extended by ingest and PRESERVED across --reset like
+-- layer_colours, so a category's colour never changes within the life of a store.
+CREATE TABLE IF NOT EXISTS vlan_colours (
+    category_key VARCHAR PRIMARY KEY,  -- 'vlan_200' | 'public' | 'unassigned' | 'multicast' | 'broadcast'
+    label        VARCHAR,
+    colour       VARCHAR,              -- hex
+    seq          INTEGER               -- -1 for fixed categories; >=0 VLAN allocation order
 );
 
 -- Tracks which pcap files have been extracted, for resumable ingest.

@@ -12,6 +12,7 @@ model takes protocols straight from the dissector.
 """
 import argparse
 import os
+import re
 import sys
 import time
 from multiprocessing import Pool
@@ -23,17 +24,34 @@ from . import config, palette, tshark
 from .aggregate import aggregate
 from .extract import extract_file, shard_path
 from .names import load_names
+from .vlans import load_vlans
 
 _SCHEMA = Path(__file__).parent / "schema.sql"
-_PCAP_EXTS = {".pcap", ".pcapng", ".cap"}
+# Accept the canonical capture extensions *and* split-capture suffixes such as
+# `.pcap001` / `.pcapng07` produced when a large capture is chopped into capped-size
+# chunks (each chunk still carries its own pcap global header). Trailing digits after
+# a known base extension are treated as a split index.
+_PCAP_RE = re.compile(r"^\.(pcapng|pcap|cap)\d*$", re.IGNORECASE)
+
+
+def _is_capture(p: Path) -> bool:
+    return bool(_PCAP_RE.match(p.suffix))
 
 # Cleared (and shards removed) by --reset. protocols is re-dumped every run anyway.
-# NOTE: `names` and `layer_colours` are intentionally NOT here -- they are durable
-# metadata that persists across --reset (only lost if the DuckDB file is deleted),
-# so given-names and a token's colour stay stable.
+# NOTE: the durable metadata tables (see _METADATA_TABLES) are intentionally NOT here --
+# they persist across --reset, so given-names, a token's colour, the VLAN definitions, a
+# category's colour, and the cached RDAP names all stay stable when captures are re-ingested.
 _RESET_TABLES = (
     "connection_protocols", "connection_layers", "connections", "endpoints",
     "flow_layers", "flows", "protocols", "manifest",
+)
+
+# Durable metadata, normally PRESERVED across --reset (only lost if the DuckDB file is
+# deleted). --reset-all ADDITIONALLY clears these so every table is rebuilt from its source
+# this run: names/vlans from their CSVs, the colour registries by re-seeding, and ip_whois
+# by re-resolving against RDAP. (Empties are skipped by their loaders, leaving them blank.)
+_METADATA_TABLES = (
+    "names", "vlans", "vlan_colours", "layer_colours", "ip_whois",
 )
 
 
@@ -47,7 +65,7 @@ def connect() -> duckdb.DuckDBPyConnection:
 def discover(input_path: Path) -> list[Path]:
     if input_path.is_file():
         return [input_path]
-    return sorted(p for p in input_path.rglob("*") if p.suffix.lower() in _PCAP_EXTS)
+    return sorted(p for p in input_path.rglob("*") if _is_capture(p))
 
 
 def needs_extract(con: duckdb.DuckDBPyConnection, pcap: Path) -> bool:
@@ -93,9 +111,16 @@ def main(argv=None) -> int:
     ap.add_argument("-m", "--memory", default="4GB",
                     help="DuckDB memory limit for aggregation (default: 4GB)")
     ap.add_argument("--reset", action="store_true",
-                    help="wipe tables, manifest, and shards before ingest")
+                    help="wipe analytical tables, manifest, and shards before ingest "
+                         "(durable metadata is preserved)")
+    ap.add_argument("--reset-all", action="store_true",
+                    help="full reset: like --reset but ALSO wipe durable metadata (names, "
+                         "vlans, colours, cached RDAP names) so every table is rebuilt from "
+                         "its sources")
     ap.add_argument("--aggregate-only", action="store_true",
                     help="skip extraction; re-aggregate existing shards")
+    ap.add_argument("--no-whois", action="store_true",
+                    help="skip RDAP/WHOIS name resolution of public IPs")
     args = ap.parse_args(argv)
 
     if not tshark.have_tshark():
@@ -104,12 +129,14 @@ def main(argv=None) -> int:
 
     con = connect()
 
-    if args.reset:
-        for t in _RESET_TABLES:
+    if args.reset or args.reset_all:
+        tables = _RESET_TABLES + (_METADATA_TABLES if args.reset_all else ())
+        for t in tables:
             con.execute(f"DELETE FROM {t}")
         for shard in config.SCRATCH_DIR.glob("*.parquet"):
             shard.unlink()
-        print("reset: cleared tables and shards")
+        scope = "all tables (incl. metadata)" if args.reset_all else "tables"
+        print(f"reset: cleared {scope} and shards")
 
     if not args.aggregate_only:
         files = discover(Path(args.input))
@@ -151,6 +178,25 @@ def main(argv=None) -> int:
         print(f"names loaded: {n} (from {config.NAMES_CSV})")
     except FileNotFoundError:
         pass  # no names CSV; leave the (preserved) names table as-is
+
+    # Auto-load VLAN definitions if present, then seed/extend the category-colour
+    # registry (the seeder needs the `vlans` rows to allocate, so load first).
+    try:
+        n = load_vlans(con, config.VLANS_CSV)
+        print(f"vlans loaded: {n} (from {config.VLANS_CSV})")
+    except FileNotFoundError:
+        pass  # no vlans CSV; leave the (preserved) vlans table as-is
+    added = palette.seed_vlan_colours(con)
+    print(f"vlan colours: +{added} new (registry preserved across runs)")
+
+    # Resolve public IPs to RDAP names (cached with a TTL). Network-bound and optional:
+    # a failure here must never abort an otherwise-complete ingest.
+    if config.WHOIS_ENABLED and not args.no_whois:
+        try:
+            from .whois import resolve_whois
+            resolve_whois(con)
+        except Exception as e:  # noqa: BLE001 -- best-effort enrichment, keep ingest alive
+            print(f"WARNING: RDAP resolution failed: {e}", file=sys.stderr)
 
     e, c, f = con.execute(
         "SELECT (SELECT count(*) FROM endpoints), "

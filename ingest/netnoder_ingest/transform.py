@@ -68,3 +68,53 @@ NOISE_TOKEN = "ethertype"
 def generic_layers_sql() -> str:
     """A SQL ``(...)`` tuple literal of the generic layer tokens, for ``NOT IN``."""
     return "(" + ", ".join(f"'{t}'" for t in GENERIC_LAYERS) + ")"
+
+
+# --- Protocol-version decoders -------------------------------------------------------
+# Each turns a dissector-emitted version field into a human label via the IANA/RFC
+# registry for that protocol -- the same kind of deterministic standards mapping as
+# ``ip.proto 6 -> tcp`` above, NOT a heuristic and NOT keyed on any cert/payload token.
+# They are protocol-agnostic in shape: extract.py reads whatever version each *present*
+# protocol exposes and the most-specific non-null label wins (see PROTOCOL_VERSION).
+# Unknown/empty codes pass through unchanged (NULL stays NULL).
+
+def tls_version_label_sql(col: str) -> str:
+    """Decode a TLS/SSL version code (e.g. '0x0303') to a label ('TLS 1.2')."""
+    return f"""
+CASE {col}
+  WHEN '0x0304' THEN 'TLS 1.3'
+  WHEN '0x0303' THEN 'TLS 1.2'
+  WHEN '0x0302' THEN 'TLS 1.1'
+  WHEN '0x0301' THEN 'TLS 1.0'
+  WHEN '0x0300' THEN 'SSL 3.0'
+  ELSE {col}
+END
+"""
+
+
+def dtls_version_label_sql(col: str) -> str:
+    """Decode a DTLS version code (e.g. '0xfefd') to a label ('DTLS 1.2')."""
+    return f"""
+CASE {col}
+  WHEN '0xfefc' THEN 'DTLS 1.3'
+  WHEN '0xfefd' THEN 'DTLS 1.2'
+  WHEN '0xfeff' THEN 'DTLS 1.0'
+  ELSE {col}
+END
+"""
+
+
+def quic_version_label_sql(col: str) -> str:
+    """Decode a QUIC transport version (e.g. '0x00000001') to a label ('QUIC v1').
+
+    Known RFC versions get a tidy label; any other (incl. drafts) passes through prefixed,
+    so an unrecognised version is still shown faithfully rather than dropped.
+    """
+    return f"""
+CASE {col}
+  WHEN '0x00000001' THEN 'QUIC v1'
+  WHEN '0x6b3343cf' THEN 'QUIC v2'
+  WHEN NULL THEN NULL
+  ELSE CASE WHEN {col} IS NULL THEN NULL ELSE 'QUIC ' || {col} END
+END
+"""
