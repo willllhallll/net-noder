@@ -26,10 +26,10 @@ Everything is seeded, so re-running produces byte-identical output.
 
 Usage: python tools/make_sample_pcap.py [out.pcap]   (default: data/captures/sample.pcap)
 """
+import argparse
 import random
 import socket
 import struct
-import sys
 from pathlib import Path
 
 ETH_SRC = "02:11:11:11:11:11"
@@ -258,29 +258,186 @@ def bulk_flows():
     return flows
 
 
-FLOWS = CURATED + multiproto_flows() + fanout_flows() + bulk_flows()
+# ---- multi-VLAN enterprise topology (mirrors data/vlans.csv) --------------------
+#
+# net-noder has NO 802.1Q tag in the pipeline: VLANs are pure IP-vs-CIDR membership
+# (server/netnoder_api/classify.py). So "many VLANs" == many distinct /24 subnets, each
+# also declared in data/vlans.csv. This block is the authoritative subnet list: keep it
+# in lock-step with vlans.csv, and only name IPs in names.csv that are actually emitted.
+
+# (vlan_id, base_ip /24, label) -- subnet mask is 255.255.255.0 for all.
+VLANS = [
+    (10,  "10.10.10.0",   "VLAN 10 — Workstations"),
+    (20,  "10.20.20.0",   "VLAN 20 — Servers"),
+    (30,  "10.30.30.0",   "VLAN 30 — VoIP"),
+    (40,  "192.168.40.0", "VLAN 40 — Guest WiFi"),
+    (50,  "192.168.50.0", "VLAN 50 — IoT"),
+    (60,  "172.16.60.0",  "VLAN 60 — DMZ"),
+    (70,  "172.16.70.0",  "VLAN 70 — Management"),
+    (100, "10.100.0.0",   "VLAN 100 — Engineering"),
+    (200, "10.200.0.0",   "VLAN 200 — Finance"),
+    (300, "10.30.3.0",    "VLAN 300 — Lab"),
+]
+
+# Real, globally-routable IPs so ingest's RDAP/WHOIS resolves real org names.
+PUBLIC = [
+    "1.1.1.1", "1.0.0.1",          # Cloudflare
+    "8.8.8.8", "8.8.4.4",          # Google
+    "9.9.9.9",                      # Quad9
+    "208.67.222.222",               # OpenDNS / Cisco
+    "140.82.121.4",                 # GitHub
+    "13.107.42.14",                 # Microsoft
+    "17.253.144.10",                # Apple
+    "142.250.80.46",                # Google
+    "151.101.1.69",                 # Fastly
+    "104.16.132.50",                # Cloudflare
+]
+
+
+def vlan_topology_flows(rng: random.Random) -> list:
+    """A multi-VLAN enterprise: per-VLAN hosts with intra/inter-VLAN, public, broadcast
+    and multicast traffic. Subnets mirror the authoritative VLANS list (and vlans.csv).
+
+    Reuses the real-payload helpers so tshark dissects by content, not port. Seeded via
+    the passed RNG for byte-identical output.
+    """
+    tls, http, ssh, ntp = tls_client_hello(), http_get(), ssh_banner(), ntp_client()
+    media = b"\x00" * 120          # undissectable UDP "media" -> stays udp/data
+    icmp, dhcp = icmp_echo(), dhcp_discover()
+    multicast_groups = ["224.0.0.251", "239.255.255.250", "224.0.0.1"]  # mDNS, SSDP, all-hosts
+
+    def net(base: str) -> str:     # "10.20.20.0" -> "10.20.20"
+        return base.rsplit(".", 1)[0]
+
+    # Build a host inventory per VLAN (~15-25 hosts, .10 upward).
+    hosts = {
+        vid: [f"{net(base)}.{10 + i}" for i in range(rng.randint(15, 25))]
+        for vid, base, _ in VLANS
+    }
+    servers, mgmt = hosts[20], hosts[70]
+
+    flows: list = []
+
+    def both(a, b, proto, ap, bp, payload, na=3, nb=2):
+        flows.append((na, a, b, proto, ap, bp, payload))
+        if nb:
+            flows.append((nb, b, a, proto, bp, ap, payload))
+
+    sp = 49152  # ephemeral source-port walker -> distinct, deterministic 5-tuples
+    def nextport() -> int:
+        nonlocal sp
+        sp = 49152 if sp >= 65000 else sp + 1
+        return sp
+
+    for vid, base, _label in VLANS:
+        p = net(base)
+        gw, bcast = f"{p}.1", f"{p}.255"
+        vhosts = hosts[vid]
+        dns = dns_query(f"host.vlan{vid}.example.net")
+
+        # Intra-VLAN: every host -> gateway (TLS/DNS/NTP/ICMP) and a few peers (mixed).
+        for h in vhosts:
+            both(h, gw, 6,  nextport(), 443, tls)
+            both(h, gw, 17, nextport(), 53,  dns)
+            both(h, gw, 17, nextport(), 123, ntp)
+            flows.append((4, h, gw, 1, 0, 0, icmp))
+            for peer in rng.sample(vhosts, k=min(3, len(vhosts))):
+                if peer == h:
+                    continue
+                proto, port, payload = rng.choice(
+                    [(6, 445, tls), (6, 22, ssh), (6, 80, http), (17, 16384, media)]
+                )
+                both(h, peer, proto, nextport(), port, payload)
+
+        # Broadcast: DHCP DISCOVER (limited) + a directed broadcast (subnet all-ones).
+        flows.append((2, vhosts[0], "255.255.255.255", 17, 68, 67, dhcp))
+        flows.append((2, vhosts[1 % len(vhosts)], bcast, 17, 138, 138, media))
+
+        # Multicast: mDNS / SSDP from a few hosts (one-directional, like the real thing).
+        for h in vhosts[:3]:
+            grp = rng.choice(multicast_groups)
+            both(h, grp, 17, 5353, 5353,
+                 dns_query("_services._dns-sd._udp.local"), na=2, nb=0)
+
+        # Inter-VLAN: client VLANs reach the Servers VLAN (TLS/HTTP/DNS).
+        if vid in (10, 40, 50, 100, 200):
+            for h in rng.sample(vhosts, k=min(8, len(vhosts))):
+                srv = rng.choice(servers)
+                both(h, srv, 6,  nextport(), 443, tls)
+                both(h, srv, 6,  nextport(), 80,  http)
+                both(h, srv, 17, nextport(), 53,  dns)
+
+        # VLAN -> public Internet (drives live WHOIS at ingest).
+        for h in rng.sample(vhosts, k=min(6, len(vhosts))):
+            pub = rng.choice(PUBLIC)
+            both(h, pub, 6,  nextport(), 443, tls)
+            both(h, pub, 17, nextport(), 53,  dns)
+
+    # Management VLAN administers every gateway (SSH + HTTPS) -> central hub nodes.
+    for _vid, base, _label in VLANS:
+        gw, admin = f"{net(base)}.1", rng.choice(mgmt)
+        both(admin, gw, 6, nextport(), 22,  ssh)
+        both(admin, gw, 6, nextport(), 443, tls)
+
+    return flows
+
+
+def build_flows(seed: int) -> list:
+    """The full flow set: the curated dissector/cast-type core + the multi-VLAN topology."""
+    rng = random.Random(seed)
+    return (
+        CURATED
+        + multiproto_flows()
+        + fanout_flows()
+        + bulk_flows()
+        + vlan_topology_flows(rng)
+    )
 
 
 def main() -> None:
-    out = Path(sys.argv[1] if len(sys.argv) > 1 else "data/captures/sample.pcap")
+    ap = argparse.ArgumentParser(
+        description="Generate a deterministic, multi-VLAN Ethernet/IPv4 sample pcap.",
+    )
+    ap.add_argument("out", nargs="?", default="data/captures/sample.pcap",
+                    help="output pcap path (default: data/captures/sample.pcap)")
+    ap.add_argument("--target-mb", type=float, default=250.0,
+                    help="approximate output size in MB; flows are scaled to hit it "
+                         "(default: 250)")
+    ap.add_argument("--seed", type=int, default=1700,
+                    help="RNG seed for the VLAN topology (default: 1700)")
+    args = ap.parse_args()
+
+    out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    flows = build_flows(args.seed)
+
+    # Scale per-flow packet counts so the file lands near --target-mb. The graph stays a
+    # few hundred endpoints (rich but bounded); flows just get heavier. 16 = the pcap
+    # per-packet record header that precedes every frame on disk.
+    REC_HDR = 16
+    base_bytes = sum(
+        count * (REC_HDR + len(frame(src, dst, proto, sp, dp, payload)))
+        for count, src, dst, proto, sp, dp, payload in flows
+    )
+    target_bytes = int(args.target_mb * 1_000_000)
+    mult = max(1, round(target_bytes / base_bytes)) if base_bytes else 1
+
     ts = 1_700_000_000
-    records = []
-    for count, src, dst, proto, sp, dp, payload in FLOWS:
-        data = frame(src, dst, proto, sp, dp, payload)
-        for _ in range(count):
-            records.append((ts, data))
-            ts += 1
-
+    written = 0
+    total = 24  # classic pcap global header
     with open(out, "wb") as f:
-        # classic pcap global header (big-endian), Ethernet link type
         f.write(struct.pack("!IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
-        for t, data in records:
-            f.write(struct.pack("!IIII", t, 0, len(data), len(data)))
-            f.write(data)
+        for count, src, dst, proto, sp, dp, payload in flows:
+            data = frame(src, dst, proto, sp, dp, payload)
+            for _ in range(count * mult):
+                f.write(struct.pack("!IIII", ts, 0, len(data), len(data)))
+                f.write(data)
+                ts += 1
+                written += 1
+                total += REC_HDR + len(data)
 
-    print(f"wrote {len(records)} packets to {out}")
+    print(f"wrote {written} packets ({total / 1e6:.1f} MB, x{mult} scale) to {out}")
 
 
 if __name__ == "__main__":
