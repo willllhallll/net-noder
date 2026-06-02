@@ -22,8 +22,11 @@ GET  /api/health
 GET  /api/stats          -> { endpoints, connections, flows, layers, total_pkts, total_bytes, first/last_seen }
 GET  /api/layers         -> [{ layer, tier, colour, count }]   (observed set; tier + colour
                             from the PERSISTED registry — first-seen-wins, never reassigned)
+GET  /api/categories     -> [{ category_key, label, colour }]  (the broadcast-domain legend:
+                            every VLAN + the fixed buckets, from broadcast_domain_colours)
 GET  /api/graph?cap=     -> { nodes[], edges[], meta }
-       Node: ip, kind, given_name, total_pkts, total_bytes, degree, first/last_seen
+       Node: ip, kind, given_name, total_pkts, total_bytes, degree, first/last_seen,
+             category, category_label, vlan_id, colour  (broadcast domain + its colour)
        Edge: connection_id, ip_a, ip_b, pkts, bytes, pkts_a2b/b2a, bytes_a2b/b2a,
              layers: string[]  (full token set, for client filter+colour), first/last
        meta: { capped, cap, shown_endpoints, total_endpoints }   (top-N by bytes)
@@ -90,3 +93,20 @@ allocates nothing. The registry is seeded at ingest:
 
 This palette is consistent everywhere — graph edges, the active-tier legend,
 connection-drawer protocol rows, and the ports-drawer accent.
+
+## Broadcast domains and endpoint colour ([palette.py](../ingest/netnoder_ingest/palette.py))
+
+Endpoints (graph nodes) are coloured by their **broadcast domain**, a single unified
+concept covering each user-defined VLAN subnet plus the fixed Public / Unassigned /
+Multicast / Broadcast buckets. The domain is classified at query time from the `vlans`
+registry ([classify.py](../server/netnoder_api/classify.py)); its colour is read from the
+persisted `broadcast_domain_colours` table — the **single source** for an endpoint's dot
+colour. Every dot referencing an endpoint (search results, the endpoint panel, and both
+the connection and flow/stack drawers, served as `colour` / `colour_a` / `colour_b`) uses
+exactly that colour, so an endpoint keeps one colour everywhere regardless of which
+protocol its flows carry.
+
+Like `layer_colours`, the registry is **first-seen-wins** and seeded at ingest by
+`seed_broadcast_domain_colours()`: the fixed buckets are pre-seeded (`seq = -1`) and each
+new VLAN takes the next `BROADCAST_DOMAIN_PALETTE` slot once and keeps it. `/api/categories`
+returns the whole registry (VLANs first, then the fixed buckets) for the filter legend.

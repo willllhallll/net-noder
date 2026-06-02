@@ -66,11 +66,11 @@ export default function ConnectionPanel({ conn, labelOpts, activeTier, lk, onBac
   return (
     <Drawer onBack={onBack} backIcon="✕">
       <h2>
-        <span className="dot" style={{ background: nodeColor({ kind: conn.kind_a }) }} />
+        <span className="dot" style={{ background: nodeColor({ colour: conn.colour_a }) }} />
         {A}
         <span className="conv-arrow">↔</span>
         {B}
-        <span className="dot" style={{ background: nodeColor({ kind: conn.kind_b }) }} />
+        <span className="dot" style={{ background: nodeColor({ colour: conn.colour_b }) }} />
       </h2>
 
       <div className="badges">

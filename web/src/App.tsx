@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import type { ElementDefinition } from "cytoscape";
 import { api } from "./api";
+import { beginLoad, endLoad } from "./loading";
 import type {
   Category,
   ConnectionStack,
@@ -29,19 +30,24 @@ import {
 } from "./format";
 import GraphCanvas from "./components/GraphCanvas";
 import SearchBar from "./components/SearchBar";
-import LayerFilter from "./components/LayerFilter";
-import VlanFilter from "./components/VlanFilter";
+import FilterPanel from "./components/FilterPanel";
+import CategoryFilter from "./components/CategoryFilter";
+import TierFilter from "./components/TierFilter";
 import EndpointPanel from "./components/EndpointPanel";
 import ConnectionPanel from "./components/ConnectionPanel";
 import StackPanel from "./components/StackPanel";
 import CapNoticeModal from "./components/CapNoticeModal";
+import LoadingBar from "./components/LoadingBar";
+import CanvasOverlay from "./components/CanvasOverlay";
+import Drawer from "./components/Drawer";
+import DrawerSkeleton from "./components/DrawerSkeleton";
 
 type LK = ReturnType<typeof buildLayerLookup>;
 
 // Base graph (hosts / focus): nodes + NEUTRAL, unlabelled edges. An edge is just
 // "a connection of any type" — protocol detail is revealed only on drill-down. Nodes
-// are coloured by VLAN/subnet category. When `activeCats` is supplied (hosts view),
-// nodes whose category is toggled off are dropped, along with any edge touching them;
+// are coloured by broadcast domain. When `activeCats` is supplied (hosts view),
+// nodes whose broadcast domain is toggled off are dropped, along with any edge touching them;
 // when it is undefined (focus view) everything is shown.
 function graphToElements(
   g: Graph,
@@ -111,7 +117,7 @@ function stacksToElements(
         whois: conn.whois_name_a,
         label: conn.ip_a,
         size: nodeSize(totalBytes),
-        color: nodeColor({ colour: conn.colour_a, kind: conn.kind_a }),
+        color: nodeColor({ colour: conn.colour_a }),
       },
     },
     {
@@ -122,7 +128,7 @@ function stacksToElements(
         whois: conn.whois_name_b,
         label: conn.ip_b,
         size: nodeSize(totalBytes),
-        color: nodeColor({ colour: conn.colour_b, kind: conn.kind_b }),
+        color: nodeColor({ colour: conn.colour_b }),
       },
     },
   ];
@@ -162,6 +168,8 @@ type GraphView =
   | { kind: "flows"; conn: ConnectionStacks; from: GraphView };
 type DrawerState =
   | null
+  // Transient state while a drawer's detail data is in flight — renders a skeleton.
+  | { kind: "loading" }
   | { kind: "connection"; conn: ConnectionStacks }
   | { kind: "stack"; conn: ConnectionStacks; stack: ConnectionStack };
 
@@ -177,6 +185,23 @@ export default function App() {
   const [drawer, setDrawer] = useState<DrawerState>(null);
   const [capNotice, setCapNotice] = useState<GraphMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // True while cytoscape is relaying out — reported by GraphCanvas, drives the canvas veil.
+  const [graphBusy, setGraphBusy] = useState(false);
+  // Filter toggles (category/tier) trigger a heavy elements rebuild + relayout but no
+  // fetch; marking those state updates as a transition keeps the UI responsive and gives
+  // us isPending to feed the global loading signal.
+  const [isPending, startTransition] = useTransition();
+
+  // A React transition (heavy fetch-free state change) feeds the shared loading signal so
+  // the top bar reflects it. The other non-fetch lag source — the cytoscape relayout — is
+  // bracketed at its own choke point inside GraphCanvas, where it can force a paint of the
+  // loading state BEFORE the synchronous fcose layout freezes the main thread. (Fetches
+  // feed the signal directly from api.ts; the relayout veil is driven by graphBusy below.)
+  useEffect(() => {
+    if (!isPending) return;
+    beginLoad();
+    return () => endLoad();
+  }, [isPending]);
 
   const lk = useMemo(() => buildLayerLookup(layers), [layers]);
 
@@ -242,6 +267,7 @@ export default function App() {
   }, []);
 
   const focusNode = useCallback(async (ip: string) => {
+    setDrawer({ kind: "loading" }); // skeleton until the endpoint view takes over
     try {
       const [g, node] = await Promise.all([
         api.neighbors(ip), // no explicit limit -> server's host-view cap governs
@@ -251,6 +277,7 @@ export default function App() {
       setGraphView({ kind: "focus", node, graph: g });
       setError(null);
     } catch (e: any) {
+      setDrawer(null);
       setError(String(e.message ?? e));
     }
   }, []);
@@ -265,6 +292,7 @@ export default function App() {
         if (stack) setDrawer({ kind: "stack", conn: graphView.conn, stack });
         return;
       }
+      setDrawer({ kind: "loading" }); // skeleton in the drawer while stacks load
       try {
         const conn = await api.connectionStacks(data.source, data.target);
         setActiveTier("application"); // default the flow view to the application tier
@@ -272,6 +300,7 @@ export default function App() {
         setDrawer({ kind: "connection", conn });
         setError(null);
       } catch (e: any) {
+        setDrawer(null);
         setError(String(e.message ?? e));
       }
     },
@@ -286,14 +315,20 @@ export default function App() {
     );
   }, []);
 
+  // Exiting a drawer back to a base view rebuilds the (potentially large) host/focus
+  // graph. Close the drawer urgently and defer the heavy graphView swap into a transition
+  // so the old view stays interactive while the new elements are built; the relayout that
+  // follows is bracketed (and paint-fenced) inside GraphCanvas.
   const exitFocus = useCallback(() => {
     setDrawer(null);
-    setGraphView({ kind: "hosts" });
+    startTransition(() => setGraphView({ kind: "hosts" }));
   }, []);
 
   const exitFlows = useCallback(() => {
     setDrawer(null);
-    setGraphView((gv) => (gv.kind === "flows" ? gv.from : { kind: "hosts" }));
+    startTransition(() =>
+      setGraphView((gv) => (gv.kind === "flows" ? gv.from : { kind: "hosts" })),
+    );
   }, []);
 
   const counts = useMemo(() => {
@@ -319,12 +354,10 @@ export default function App() {
             <span>{fmtBytes(stats.total_bytes)}</span>
           </div>
         )}
-        <SearchBar
-          labelOpts={labelOpts}
-          setLabelOpts={setLabelOpts}
-          onPick={focusNode}
-        />
+        <SearchBar onPick={focusNode} />
       </header>
+
+      <LoadingBar />
 
       {error && <div className="error">{error}</div>}
 
@@ -335,7 +368,11 @@ export default function App() {
           onNodeTap={focusNode}
           onEdgeTap={onEdgeTap}
           onBackgroundTap={onBackgroundTap}
+          onBusyChange={setGraphBusy}
         />
+
+        {/* Graph-only veil: during the initial load (no host graph yet) or any relayout. */}
+        <CanvasOverlay show={graphBusy || !hostGraph} />
 
         {graphView.kind === "focus" && (
           <div className="view-banner">endpoint view · {graphView.node.ip}</div>
@@ -347,32 +384,40 @@ export default function App() {
           </div>
         )}
 
-        {/* The tier filter lives in the flow view only — it colours the flow arrows. */}
-        {graphView.kind === "flows" && (
-          <LayerFilter
-            activeTier={activeTier}
-            setActiveTier={setActiveTier}
-            tierLegend={tierLegend}
-            nodeCount={counts.nodes}
-            edgeCount={counts.edges}
-          />
-        )}
+        {/* The bottom-left control panel, present in every view: Labels toggles on top
+            (so the label choice persists across view changes) + the per-view filter
+            below — the category filter in hosts/focus, the tier stepper in the flow view. */}
+        <FilterPanel
+          labelOpts={labelOpts}
+          setLabelOpts={setLabelOpts}
+          nodeCount={counts.nodes}
+          edgeCount={counts.edges}
+          edgeLabel={graphView.kind === "flows" ? "flows" : "connections"}
+        >
+          {graphView.kind === "flows" ? (
+            <TierFilter
+              activeTier={activeTier}
+              // Recolour/relabel is a heavy, fetch-free relayout — run it as a transition.
+              setActiveTier={(t) => startTransition(() => setActiveTier(t))}
+              tierLegend={tierLegend}
+            />
+          ) : (
+            categories.length > 0 && (
+              <CategoryFilter
+                categories={categories}
+                active={activeCats}
+                // Toggling a domain rebuilds elements + relayouts — run it as a transition.
+                setActive={(s) => startTransition(() => setActiveCats(s))}
+              />
+            )
+          )}
+        </FilterPanel>
 
-        {/* The VLAN/category filter is shown in the hosts AND focus views — the focus
-            view inherits the same toggles so filtering carries through on drill-in.
-            (Shares the bottom-left slot with LayerFilter, shown only in the flow view.) */}
-        {(graphView.kind === "hosts" || graphView.kind === "focus") &&
-          categories.length > 0 && (
-          <VlanFilter
-            categories={categories}
-            active={activeCats}
-            setActive={setActiveCats}
-            nodeCount={counts.nodes}
-            edgeCount={counts.edges}
-          />
-        )}
-
-        {drawer?.kind === "stack" ? (
+        {drawer?.kind === "loading" ? (
+          <Drawer onBack={() => setDrawer(null)}>
+            <DrawerSkeleton />
+          </Drawer>
+        ) : drawer?.kind === "stack" ? (
           <StackPanel
             conn={drawer.conn}
             stack={drawer.stack}

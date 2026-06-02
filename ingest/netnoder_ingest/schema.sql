@@ -162,15 +162,15 @@ CREATE TABLE IF NOT EXISTS vlans (
     label       VARCHAR                -- optional friendly name; NULL -> 'VLAN <id>'
 );
 
--- Persisted category -> colour registry, first-seen-wins. The fixed categories get
--- curated colours (seq = -1); each vlan_id takes the next VLAN_PALETTE slot once and
--- keeps it (seq >= 0). Seeded/extended by ingest and PRESERVED across --reset like
--- layer_colours, so a category's colour never changes within the life of a store.
-CREATE TABLE IF NOT EXISTS vlan_colours (
+-- Persisted broadcast-domain -> colour registry, first-seen-wins. The fixed domains get
+-- curated colours (seq = -1); each VLAN subnet takes the next BROADCAST_DOMAIN_PALETTE slot
+-- once and keeps it (seq >= 0). Seeded/extended by ingest and PRESERVED across --reset like
+-- layer_colours, so a domain's colour never changes within the life of a store.
+CREATE TABLE IF NOT EXISTS broadcast_domain_colours (
     category_key VARCHAR PRIMARY KEY,  -- 'vlan_200' | 'public' | 'unassigned' | 'multicast' | 'broadcast'
     label        VARCHAR,
     colour       VARCHAR,              -- hex
-    seq          INTEGER               -- -1 for fixed categories; >=0 VLAN allocation order
+    seq          INTEGER               -- -1 for fixed domains; >=0 VLAN allocation order
 );
 
 -- Tracks which pcap files have been extracted, for resumable ingest.

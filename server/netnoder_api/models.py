@@ -41,15 +41,15 @@ class Node(BaseModel):
     degree: int
     first_seen: Optional[float] = None
     last_seen: Optional[float] = None
-    # VLAN/subnet category, derived at query time from the `vlans` registry.
+    # Broadcast domain, derived at query time from the `vlans` registry.
     category: str = "unassigned"
     category_label: str = "Unassigned"
     vlan_id: Optional[int] = None
-    colour: str = "#60a5fa"  # category colour from vlan_colours (fallback = sky-blue)
+    colour: str = "#60a5fa"  # broadcast-domain colour from broadcast_domain_colours (fallback = sky-blue)
 
 
 class Category(BaseModel):
-    """One endpoint colour category (a VLAN or a fixed bucket) for the filter legend."""
+    """One broadcast domain (a VLAN subnet or a fixed bucket) for the filter legend."""
     category_key: str
     label: str
     colour: str
@@ -125,8 +125,8 @@ class ConnectionStacks(BaseModel):
     whois_name_b: Optional[str] = None  # RDAP-resolved name for ip_b
     kind_a: str
     kind_b: str
-    # Category colours (from vlan_colours), so the flow view paints its two endpoints the
-    # same as the base graph instead of falling back to kind-based colours.
+    # Broadcast-domain colours (from broadcast_domain_colours), so the flow view paints its
+    # two endpoints the same as the base graph (the single source for endpoint dot colour).
     colour_a: str = "#60a5fa"
     colour_b: str = "#60a5fa"
     pkts_a2b: int

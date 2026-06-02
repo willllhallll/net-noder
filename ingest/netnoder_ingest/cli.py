@@ -40,7 +40,7 @@ def _is_capture(p: Path) -> bool:
 # Cleared (and shards removed) by --reset. protocols is re-dumped every run anyway.
 # NOTE: the durable metadata tables (see _METADATA_TABLES) are intentionally NOT here --
 # they persist across --reset, so given-names, a token's colour, the VLAN definitions, a
-# category's colour, and the cached RDAP names all stay stable when captures are re-ingested.
+# broadcast domain's colour, and the cached RDAP names all stay stable when captures are re-ingested.
 _RESET_TABLES = (
     "connection_protocols", "connection_layers", "connections", "endpoints",
     "flow_layers", "flows", "protocols", "manifest",
@@ -51,7 +51,7 @@ _RESET_TABLES = (
 # this run: names/vlans from their CSVs, the colour registries by re-seeding, and ip_whois
 # by re-resolving against RDAP. (Empties are skipped by their loaders, leaving them blank.)
 _METADATA_TABLES = (
-    "names", "vlans", "vlan_colours", "layer_colours", "ip_whois",
+    "names", "vlans", "broadcast_domain_colours", "layer_colours", "ip_whois",
 )
 
 
@@ -59,7 +59,23 @@ def connect() -> duckdb.DuckDBPyConnection:
     config.ensure_dirs()
     con = duckdb.connect(str(config.DB_PATH))
     con.execute(_SCHEMA.read_text())
+    _migrate(con)
     return con
+
+
+def _migrate(con: duckdb.DuckDBPyConnection) -> None:
+    """One-time, idempotent schema migrations for pre-existing stores."""
+    # The colour registry was renamed vlan_colours -> broadcast_domain_colours. Carry an
+    # old store's rows across (schema.sql has already created the new, empty table); the
+    # registry would also re-seed deterministically, but this preserves any netnoder-colors regen.
+    has_old = con.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'vlan_colours'"
+    ).fetchone()
+    if has_old:
+        empty = con.execute("SELECT count(*) FROM broadcast_domain_colours").fetchone()[0] == 0
+        if empty:
+            con.execute("INSERT INTO broadcast_domain_colours SELECT * FROM vlan_colours")
+        con.execute("DROP TABLE vlan_colours")
 
 
 def discover(input_path: Path) -> list[Path]:
@@ -179,15 +195,15 @@ def main(argv=None) -> int:
     except FileNotFoundError:
         pass  # no names CSV; leave the (preserved) names table as-is
 
-    # Auto-load VLAN definitions if present, then seed/extend the category-colour
+    # Auto-load VLAN definitions if present, then seed/extend the broadcast-domain colour
     # registry (the seeder needs the `vlans` rows to allocate, so load first).
     try:
         n = load_vlans(con, config.VLANS_CSV)
         print(f"vlans loaded: {n} (from {config.VLANS_CSV})")
     except FileNotFoundError:
         pass  # no vlans CSV; leave the (preserved) vlans table as-is
-    added = palette.seed_vlan_colours(con)
-    print(f"vlan colours: +{added} new (registry preserved across runs)")
+    added = palette.seed_broadcast_domain_colours(con)
+    print(f"broadcast domain colours: +{added} new (registry preserved across runs)")
 
     # Resolve public IPs to RDAP names (cached with a TTL). Network-bound and optional:
     # a failure here must never abort an otherwise-complete ingest.

@@ -8,8 +8,8 @@ import {
   fmtTime,
   isEncrypted,
   isUnresolved,
-  mostSpecific,
   NEUTRAL_EDGE,
+  nodeColor,
   resolveLabel,
   shortVersion,
   versionOwnerToken,
@@ -41,8 +41,6 @@ export default function StackPanel({ conn, stack, labelOpts, activeTier, lk, onB
   const verOwner = versionOwnerToken(stack.protocol_version);
 
   const colour = edgeStyle(stack.layers, activeTier, lk).color;
-  const headColour =
-    lk.map.get(mostSpecific(stack.layers, lk) ?? "")?.colour ?? NEUTRAL_EDGE;
 
   const portsA = useMemo<PortChip[]>(
     () => stack.ports_a.map((port) => ({ port, colour })),
@@ -56,10 +54,11 @@ export default function StackPanel({ conn, stack, labelOpts, activeTier, lk, onB
   return (
     <Drawer onBack={onBack} backIcon="←">
       <h2>
-        <span className="dot" style={{ background: headColour }} />
+        <span className="dot" style={{ background: nodeColor({ colour: conn.colour_a }) }} />
         {A}
         <span className="conv-arrow">↔</span>
         {B}
+        <span className="dot" style={{ background: nodeColor({ colour: conn.colour_b }) }} />
       </h2>
 
       <div className="badges">

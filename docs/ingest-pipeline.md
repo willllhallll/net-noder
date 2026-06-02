@@ -80,12 +80,13 @@ via `memory_limit` + a spill `temp_directory`):
 colours → load names`. The `manifest` table records each file's size/mtime/shard so
 unchanged files are skipped on re-run; aggregation always rebuilds the rollups from
 all current shards. After aggregation it persists the `tshark -G protocols` dump,
-seeds/extends the `layer_colours` registry ([palette.py](../ingest/netnoder_ingest/palette.py),
-first-seen-wins), and loads given-names from `names.csv` if present.
+seeds/extends the `layer_colours` and `broadcast_domain_colours` registries
+([palette.py](../ingest/netnoder_ingest/palette.py), both first-seen-wins), loads VLAN
+definitions from `vlans.csv` and given-names from `names.csv` if present.
 
-`--reset` wipes the analytical tables + shards but **preserves** `names` and
-`layer_colours` (durable metadata — only a deleted DuckDB file resets them);
-`--aggregate-only` re-aggregates existing shards.
+`--reset` wipes the analytical tables + shards but **preserves** the durable metadata —
+`names`, `vlans`, `layer_colours`, `broadcast_domain_colours` (only a deleted DuckDB file
+resets them); `--aggregate-only` re-aggregates existing shards.
 
 ## Loading names
 

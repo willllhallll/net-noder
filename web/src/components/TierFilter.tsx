@@ -12,28 +12,20 @@ interface Props {
   setActiveTier: (t: Tier) => void;
   // Tokens currently visible at the active tier, with their persisted colours.
   tierLegend: TierLegendItem[];
-  nodeCount: number;
-  edgeCount: number;
 }
 
-// The headline control: a tier stepper (link -> network -> transport ->
+// The flow-view filter body: a tier stepper (link -> network -> transport ->
 // application) that recolours + relabels the flow edges by the protocol they carry
 // at the active tier (flows with none at the tier go neutral grey/dashed). A tier is
-// ALWAYS selected — it defaults to transport. The legend below is SCOPED to the
+// ALWAYS selected — it defaults to application. The legend below is SCOPED to the
 // active tier so every visible colour is explained.
-export default function LayerFilter({
+export default function TierFilter({
   activeTier,
   setActiveTier,
   tierLegend,
-  nodeCount,
-  edgeCount,
 }: Props) {
   return (
-    <div className="layer-filter">
-      <div className="legend-title">
-        {nodeCount} endpoints · {edgeCount} flows
-      </div>
-
+    <>
       <div className="tier-stepper">
         {TIER_ORDER.map((t) => (
           <button
@@ -61,7 +53,7 @@ export default function LayerFilter({
           No {activeTier} protocols in the current view.
         </div>
       )}
-    </div>
+    </>
   );
 }
 

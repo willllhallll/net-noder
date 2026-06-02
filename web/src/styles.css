@@ -22,7 +22,13 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  font:
+    13px/1.4 ui-sans-serif,
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    sans-serif;
 }
 
 .app {
@@ -89,7 +95,61 @@ input,
   width: 90px;
 }
 
-/* The two independent label toggles (given name / WHOIS name) in the top bar. */
+/* Accent-filled checkbox: a rounded panel-2 box that fills with accent blue and
+   shows a dark checkmark when ticked — mirroring the .tier-btn.active treatment so
+   checkboxes share the design language. Global, so it covers every checkbox at once.
+   appearance:none + the explicit box reset overrides the generic `input` rule above. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-content: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+input[type="checkbox"]:hover {
+  border-color: var(--accent);
+}
+
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The tick: a clip-path checkmark in the app's dark base colour, scaled in on check. */
+input[type="checkbox"]::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  background: #0b0f17;
+  clip-path: polygon(
+    14% 47%,
+    0 60%,
+    40% 100%,
+    100% 22%,
+    85% 9%,
+    38% 70%
+  );
+  transform: scale(0);
+  transition: transform 0.12s;
+}
+
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+/* The two independent label toggles (given name / WHOIS name). */
 .label-toggles {
   display: flex;
   gap: 12px;
@@ -104,13 +164,6 @@ input,
   font-size: 13px;
   color: var(--text);
   white-space: nowrap;
-  cursor: pointer;
-}
-
-.label-toggle input[type="checkbox"] {
-  width: auto;
-  margin: 0;
-  padding: 0;
   cursor: pointer;
 }
 
@@ -137,7 +190,7 @@ input,
   border-radius: 6px;
   max-height: 260px;
   overflow: auto;
-  z-index: 20;
+  z-index: 50;
 }
 
 .search-results li {
@@ -166,8 +219,7 @@ input,
 }
 
 .legend,
-.layer-filter,
-.vlan-filter {
+.filter-panel {
   position: absolute;
   left: 12px;
   bottom: 12px;
@@ -179,7 +231,21 @@ input,
   max-width: 240px;
 }
 
-/* VLAN/category filter (hosts view): a select-all button + one checkbox row per
+/* A labelled block inside the filter panel (e.g. the Labels toggles), kept above the
+   per-view filter. The heading reuses the top-bar field-label treatment. */
+.filter-section {
+  margin-bottom: 8px;
+}
+
+.filter-section > span {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+/* Category filter (hosts/focus view): a select-all button + one checkbox row per
    ingested category. Shares the bottom-left slot with the flow-view tier filter. */
 .select-all-btn {
   background: var(--panel-2);
@@ -189,7 +255,7 @@ input,
   padding: 3px 8px;
   font-size: 11px;
   cursor: pointer;
-  margin: 4px 0 8px;
+  margin-top: 8px;
 }
 
 .select-all-btn:hover {
@@ -212,12 +278,7 @@ input,
   cursor: pointer;
 }
 
-.cat-row input {
-  margin: 0;
-  cursor: pointer;
-}
-
-/* Tier stepper: the headline layer filter */
+/* Tier stepper (flow view): the protocol-tier filter inside the panel. */
 .tier-stepper {
   display: flex;
   flex-wrap: wrap;
@@ -640,4 +701,167 @@ table.kv td:first-child {
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
+}
+
+/* ── Loading indication ─────────────────────────────────────────────────────
+   A single generic vocabulary used everywhere there is a transition: a global
+   indeterminate top bar, a graph-only canvas veil, an inline spinner, and drawer
+   skeletons. Driven by the shared loading signal (loading.ts). */
+
+/* Indeterminate top progress bar (NProgress / Material "linear progress" style). The
+   3px track always occupies layout so content never jumps; only the fill animates. */
+.loading-bar {
+  position: relative;
+  height: 3px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: transparent;
+}
+
+.loading-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 50%, #93c5fd)
+  );
+  opacity: 0;
+  /* Animate via transform only, and promote to its own compositor layer. The heavy fcose
+     relayout freezes the MAIN thread for seconds; a transform/opacity animation runs on
+     the COMPOSITOR thread, so this bar keeps sweeping smoothly through that freeze. (An
+     older left/width sweep would stall, since those are main-thread layout properties.) */
+  will-change: transform;
+  transform: translateX(-110%);
+}
+
+.loading-bar.is-active .loading-bar-fill {
+  opacity: 1;
+  animation: loadbar-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes loadbar-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(355%);
+  }
+}
+
+/* Border spinner — used by the canvas veil and inline in the search dropdown. */
+.spinner {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.spinner-sm {
+  width: 13px;
+  height: 13px;
+  border-width: 2px;
+  vertical-align: -2px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Graph-only veil: a subtle dim over the canvas with a centred spinner. */
+.canvas-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(1px);
+  pointer-events: none;
+}
+
+.canvas-overlay-label {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
+
+.search-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Drawer skeleton: shimmer placeholders shaped like the real panel content. */
+.drawer-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 2px;
+}
+
+.skeleton {
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--panel-2) 25%,
+    color-mix(in srgb, var(--panel-2) 60%, var(--border)) 37%,
+    var(--panel-2) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+.skel-title {
+  height: 22px;
+  width: 60%;
+}
+
+.skel-line {
+  height: 12px;
+  width: 100%;
+}
+
+.skel-line.short {
+  width: 45%;
+}
+
+.skel-block {
+  height: 64px;
+  width: 100%;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+/* Respect reduced-motion: keep the indicators visible but stop the animations. */
+@media (prefers-reduced-motion: reduce) {
+  .loading-bar.is-active .loading-bar-fill {
+    animation: none;
+    transform: none;
+    width: 100%;
+  }
+  .spinner {
+    animation-duration: 2s;
+  }
+  .skeleton {
+    animation: none;
+  }
 }

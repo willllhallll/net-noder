@@ -80,8 +80,8 @@ def main(argv=None) -> int:
     try:
         n = load_vlans(con, Path(args.csv))
         from . import palette
-        added = palette.seed_vlan_colours(con)
-        print(f"vlans loaded: {n} (from {args.csv}); vlan colours +{added}")
+        added = palette.seed_broadcast_domain_colours(con)
+        print(f"vlans loaded: {n} (from {args.csv}); broadcast domain colours +{added}")
     except FileNotFoundError:
         print(f"ERROR: vlans CSV not found: {args.csv}", file=sys.stderr)
         return 1

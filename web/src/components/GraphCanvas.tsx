@@ -3,6 +3,7 @@ import cytoscape, { Core, ElementDefinition } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import type { LabelOpts } from "../types";
 import { resolveLabel } from "../format";
+import { afterPaint, beginLoad, endLoad } from "../loading";
 
 cytoscape.use(fcose);
 
@@ -146,6 +147,10 @@ interface Props {
   onNodeTap: (ip: string) => void;
   onEdgeTap: (data: any) => void;
   onBackgroundTap?: () => void;
+  // Reports whether the graph is mid-relayout, so the parent can veil the canvas. The
+  // expensive fcose layout runs after React commits, so React's own pending state can't
+  // see it — we surface it from cytoscape's layout lifecycle instead.
+  onBusyChange?: (busy: boolean) => void;
 }
 
 function nodeLabel(d: any, opts: LabelOpts): string {
@@ -158,11 +163,22 @@ export default function GraphCanvas({
   onNodeTap,
   onEdgeTap,
   onBackgroundTap,
+  onBusyChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
-  const cbRef = useRef({ onNodeTap, onEdgeTap, onBackgroundTap });
-  cbRef.current = { onNodeTap, onEdgeTap, onBackgroundTap };
+  const cbRef = useRef({ onNodeTap, onEdgeTap, onBackgroundTap, onBusyChange });
+  cbRef.current = { onNodeTap, onEdgeTap, onBackgroundTap, onBusyChange };
+  // Latest label choice, read inside the (deferred) relayout so freshly-added nodes are
+  // labelled correctly without re-subscribing the layout effect to labelOpts.
+  const labelRef = useRef(labelOpts);
+  labelRef.current = labelOpts;
+  // Signature of the id-set last COMMITTED to the canvas. Comparing the incoming signature
+  // against this tells us — in O(1) — whether the node/edge set changed (relayout needed)
+  // or only data changed (in-place update). Starts at the empty-set signature so the first
+  // render of an empty graph is a no-op, matching the initial canvas. Updated only when a
+  // path actually commits, so a cancelled (superseded) update can't desync it.
+  const committedSigRef = useRef("0:0");
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -188,50 +204,129 @@ export default function GraphCanvas({
     };
   }, []);
 
-  // Sync elements: add new, drop removed, update data on the rest. Relayout only
-  // when the node/edge SET changes — a tier recolour just updates data in place.
+  // Sync elements into cytoscape. The node/edge SET changing means a relayout — and the
+  // fcose layout runs SYNCHRONOUSLY on the main thread, freezing the page for as long as
+  // it takes (seconds, for a large host graph). If we simply did the work here the freeze
+  // would start before the browser could paint any "loading" feedback, so the user's click
+  // would look dead until the layout finished. Instead we detect the set change cheaply,
+  // raise the loading/veil signal, await a real paint (afterPaint), and only THEN do the
+  // heavy diff + layout — so the indicator is on-screen (and animating on the compositor)
+  // before the freeze. A pure data update (e.g. a tier recolour keeps the same ids) needs
+  // no relayout and is applied in place, synchronously, with no veil.
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;
-    const incoming = new Set(elements.map((e) => String(e.data!.id)));
-    let changed = false;
-    cy.batch(() => {
-      cy.elements().forEach((el) => {
-        if (!incoming.has(el.id())) {
-          el.remove();
-          changed = true;
-        }
+
+    // Build the incoming id set and an order-independent signature of it in a SINGLE pass.
+    // The signature is `size:hash`, where hash is the commutative sum of a per-id string
+    // hash — so it doesn't depend on element order, and matching ids in any order produce
+    // the same value. This replaces the old per-id `cy.getElementById()` membership scan
+    // (an O(n) sweep of cytoscape-internal lookups on every update); comparing two short
+    // signature strings is O(1) and folds its only loop into the map we already run here.
+    let hash = 0;
+    const incomingIds = new Set(
+      elements.map((e) => {
+        const id = String(e.data!.id);
+        let h = 0;
+        for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+        hash = (hash + h) | 0;
+        return id;
+      }),
+    );
+    const incomingSig = `${incomingIds.size}:${hash}`;
+
+    // Set unchanged → data-only update (e.g. a tier recolour keeps the same ids): apply in
+    // place, no relayout, no veil. A signature collision would only mis-route a same-size
+    // id-swap into this path, which the data types and UI/UX flows don't produce in practice.
+    if (incomingSig === committedSigRef.current) {
+      cy.batch(() => {
+        elements.forEach((el) => {
+          cy.getElementById(String(el.data!.id)).data(el.data!);
+        });
+        // The data refresh above resets each node's label to its raw id, so re-resolve
+        // node labels to the current label choice (edge labels are data-driven).
+        cy.nodes().forEach((nd) => {
+          nd.data("label", nodeLabel(nd.data(), labelRef.current));
+        });
       });
-      elements.forEach((el) => {
-        const existing = cy.getElementById(String(el.data!.id));
-        if (existing.empty()) {
-          cy.add(el);
-          changed = true;
-        } else {
-          existing.data(el.data!);
-        }
+      return;
+    }
+
+    // Relayout path: light the indicator + veil now, balanced by `release()` exactly once.
+    beginLoad();
+    cbRef.current.onBusyChange?.(true);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      cbRef.current.onBusyChange?.(false);
+      endLoad();
+    };
+
+    let cancelled = false;
+    afterPaint().then(() => {
+      // Bail if a newer elements set superseded us, or the graph was torn down, while we
+      // waited for the paint — the cleanup's release() has already balanced the signal.
+      if (cancelled || cyRef.current !== cy) return;
+
+      // Heavy diff: drop removed, add new, update the rest — then relabel so freshly-added
+      // nodes honour the current label choice.
+      cy.batch(() => {
+        cy.elements().forEach((el) => {
+          if (!incomingIds.has(el.id())) el.remove();
+        });
+        elements.forEach((el) => {
+          const existing = cy.getElementById(String(el.data!.id));
+          if (existing.empty()) cy.add(el);
+          else existing.data(el.data!);
+        });
+        cy.nodes().forEach((nd) => {
+          nd.data("label", nodeLabel(nd.data(), labelRef.current));
+        });
       });
-    });
-    if (changed) {
+      // This set is now on the canvas — record its signature so a following data-only
+      // update is recognised. Done only here (post-commit), never for a cancelled update.
+      committedSigRef.current = incomingSig;
+
       const n = cy.nodes().length;
       if (n === 2) {
-        // Flow-fan view: position the pair compactly, then fit zoomed-in & clear of
-        // the drawer (no force layout needed for two fixed endpoints).
-        placeFlowNodes(cy);
-        fitFlowView(cy);
+        // Flow-fan view: position the pair compactly, then fit zoomed-in & clear of the
+        // drawer (no force layout needed for two fixed endpoints) — synchronous.
+        try {
+          placeFlowNodes(cy);
+          fitFlowView(cy);
+        } finally {
+          release();
+        }
       } else {
-        cy.layout(layoutFor(n)).run();
+        // Force layout is asynchronous: hold the signal until layoutstop fires.
+        const layout = cy.layout(layoutFor(n));
+        layout.one("layoutstop", release);
+        try {
+          layout.run();
+        } catch {
+          release();
+        }
       }
-    }
+    });
+
+    return () => {
+      // A new elements set arrived (or we unmounted) before this one settled — cancel the
+      // pending work and balance the signal so the veil/bar can't get stuck on.
+      cancelled = true;
+      release();
+    };
   }, [elements]);
 
+  // Relabel existing nodes when the label choice changes on its own (no element-set change
+  // — that case is handled inside the relayout above using labelRef).
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;
     cy.nodes().forEach((n) => {
       n.data("label", nodeLabel(n.data(), labelOpts));
     });
-  }, [labelOpts, elements]);
+  }, [labelOpts]);
 
   return <div ref={containerRef} className="graph" />;
 }

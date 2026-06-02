@@ -35,15 +35,12 @@ export function fmtTime(t: number | null): string {
   return new Date(t * 1000).toLocaleString();
 }
 
-// Node colour by VLAN/subnet CATEGORY, served per-node as `colour` (from the
-// vlan_colours registry). Flow-view nodes come from ConnectionStacks (no category),
-// so we keep the old kind-based fallback: multicast purple, broadcast red, else
-// sky-blue. Edges are coloured by protocol, not by node.
-export function nodeColor(n: { colour?: string; kind: string }): string {
-  if (n.colour) return n.colour;
-  if (n.kind === "multicast") return "#a855f7";
-  if (n.kind === "broadcast") return "#ef4444";
-  return "#60a5fa";
+// Endpoint dot colour is the persisted broadcast-domain colour the API serves
+// (node.colour, or colour_a/colour_b on a connection, both from the
+// broadcast_domain_colours registry). A single neutral default guards the rare case
+// where a colour is missing/empty. Edges are coloured by protocol, not by node.
+export function nodeColor(n: { colour?: string }): string {
+  return n.colour || "#60a5fa";
 }
 
 // Neutral edge colour: used in the default (no-tier) view and for edges with no

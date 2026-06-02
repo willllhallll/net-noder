@@ -1,6 +1,6 @@
 """`netnoder-colors` command: re-allocate the persisted colour scheme on demand.
 
-The ingest registries (`layer_colours`, `vlan_colours`) are deliberately *stable* --
+The ingest registries (`layer_colours`, `broadcast_domain_colours`) are deliberately *stable* --
 a token's colour never changes once allocated. This command exists to break that
 stability when you want to *explore* different looks: it wipes the chosen registry/ies
 and re-allocates them under a `--scheme` and `--seed`. Colours are read live by the API,
@@ -30,8 +30,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=None,
                     help="seed for reproducibility (default: random, printed so you can "
                          "reproduce a look you like)")
-    ap.add_argument("--target", choices=("both", "protocols", "vlans"), default="both",
-                    help="which registry to re-allocate (default: both)")
+    ap.add_argument("--target", choices=("both", "protocols", "broadcast-domains"),
+                    default="both", help="which registry to re-allocate (default: both)")
     ap.add_argument("--keep-anchors", action="store_true",
                     help="keep curated anchor colours (tcp/dns/public/...) fixed and only "
                          "reshuffle the rest (default: shake everything)")
@@ -43,12 +43,12 @@ def main(argv=None) -> int:
     con = duckdb.connect(str(config.DB_PATH))
     con.execute((Path(__file__).parent / "schema.sql").read_text())
     try:
-        layers = vlans = None
+        layers = domains = None
         if args.target in ("both", "protocols"):
             layers = palette.regenerate_layer_colours(
                 con, scheme=args.scheme, seed=seed, keep_anchors=args.keep_anchors)
-        if args.target in ("both", "vlans"):
-            vlans = palette.regenerate_vlan_colours(
+        if args.target in ("both", "broadcast-domains"):
+            domains = palette.regenerate_broadcast_domain_colours(
                 con, scheme=args.scheme, seed=seed, keep_anchors=args.keep_anchors)
     finally:
         con.close()
@@ -56,8 +56,8 @@ def main(argv=None) -> int:
     parts = []
     if layers is not None:
         parts.append(f"{layers} protocol layers")
-    if vlans is not None:
-        parts.append(f"{vlans} vlan categories")
+    if domains is not None:
+        parts.append(f"{domains} broadcast domains")
     anchors = "anchors kept" if args.keep_anchors else "anchors shaken"
     print(f"recoloured {', '.join(parts)}; scheme={args.scheme} seed={seed} ({anchors})")
     return 0

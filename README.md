@@ -99,15 +99,18 @@ manually outside the container, run that script.
 | `connection_protocols` | per-(pair, layer) presence rollup (the edge-click drawer)                 |
 | `protocols`            | `tshark -G protocols` reference dump (validation; never drives colour)    |
 | `names`                | user-curated IP → given name, loaded from `names.csv` (preserved on reset) |
+| `vlans`                | user-curated VLAN subnet definitions, loaded from `vlans.csv` (preserved on reset) |
 | `layer_colours`        | persisted tier + colour per layer, first-seen-wins (preserved on reset)   |
+| `broadcast_domain_colours` | persisted colour per broadcast domain (VLANs + Public/Unassigned/Multicast/Broadcast), first-seen-wins (preserved on reset) |
 | `manifest`             | ingest bookkeeping for resumable runs                                     |
 
 The base of record is two relations — `flows` (key → measures) and `flow_layers`
 (the deepest dissected stack, one token per layer) — chosen so the schema is in
 **ETNF/5NF** with no redundant tuples. Everything else is a materialised view over
-them, rebuilt atomically each aggregation. Given-names (`names`) and the layer-colour
-registry (`layer_colours`) live in the **same** store but are **preserved across
-`--reset`** — only lost if the DuckDB file itself is deleted. See
+them, rebuilt atomically each aggregation. Given-names (`names`), VLAN definitions
+(`vlans`) and the colour registries (`layer_colours`, `broadcast_domain_colours`) live in
+the **same** store but are **preserved across `--reset`** — only lost if the DuckDB file
+itself is deleted. See
 [docs/database.md](docs/database.md).
 
 ## Configuration (env vars)

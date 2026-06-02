@@ -6,13 +6,21 @@ import type {
   NodeT,
   Stats,
 } from "./types";
+import { beginLoad, endLoad } from "./loading";
 
+// Every request brackets itself with begin/endLoad so the global loading signal covers
+// all API latency automatically — no per-call-site wiring needed at the call sites.
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, init);
-  if (!r.ok) {
-    throw new Error(`${r.status} ${r.statusText}: ${await r.text()}`);
+  beginLoad();
+  try {
+    const r = await fetch(url, init);
+    if (!r.ok) {
+      throw new Error(`${r.status} ${r.statusText}: ${await r.text()}`);
+    }
+    return (await r.json()) as T;
+  } finally {
+    endLoad();
   }
-  return (await r.json()) as T;
 }
 
 const enc = encodeURIComponent;

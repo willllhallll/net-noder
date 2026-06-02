@@ -6,9 +6,11 @@ served **read-only** by the API. Schema in
 
 - **Rebuildable analytical data** — `flows`, `flow_layers`, and the derived views;
   wiped + rebuilt on every aggregation / `--reset`.
-- **Durable metadata** — `names` (loaded from `names.csv`) and `layer_colours` (the
-  persisted tier+colour registry). These are **preserved across `--reset`** and
-  re-aggregation; they are only lost if the DuckDB file itself is deleted.
+- **Durable metadata** — `names` (loaded from `names.csv`), `vlans` (VLAN subnet
+  definitions from `vlans.csv`), `layer_colours` (the persisted tier+colour registry) and
+  `broadcast_domain_colours` (the persisted colour-per-broadcast-domain registry). These are
+  **preserved across `--reset`** and re-aggregation; they are only lost if the DuckDB file
+  itself is deleted.
 - **Reference / bookkeeping** — `protocols`, `manifest`.
 
 There is no separate API metadata store: the API writes nothing.
@@ -87,14 +89,21 @@ manifest  (path, size, mtime, status,...) -- resumable ingest bookkeeping
 ```
 names         (ip PK, given_name)                       -- loaded from names.csv by
                                                         -- `netnoder-names`; joined at query time
+vlans         (vlan_id PK, base_ip, subnet_mask, label) -- loaded from vlans.csv by
+                                                        -- `netnoder-vlans`; drives query-time classification
 layer_colours (layer PK, tier, colour, seq, unresolved) -- first-seen-wins colour registry;
                                                         -- anchors seeded with seq = -1;
                                                         -- unresolved=TRUE for stop-markers ('data')
+broadcast_domain_colours (category_key PK, label, colour, seq)
+                                                        -- first-seen-wins colour per broadcast domain
+                                                        -- (each VLAN + the fixed Public/Unassigned/
+                                                        -- Multicast/Broadcast buckets at seq = -1)
 ```
 
-`netnoder-ingest` excludes both from `--reset` and never re-allocates an existing
-`layer_colours` row, so a given name and a token's colour are stable for the life of
-the store. Colours are seeded/extended at ingest by
+`netnoder-ingest` excludes these from `--reset` and never re-allocates an existing
+`layer_colours` / `broadcast_domain_colours` row, so a given name, a VLAN definition, a
+token's colour and a broadcast domain's colour are stable for the life of the store.
+Colours are seeded/extended at ingest by
 [palette.py](../ingest/netnoder_ingest/palette.py).
 
 ## Why this is ETNF (and 5NF for the base relations)

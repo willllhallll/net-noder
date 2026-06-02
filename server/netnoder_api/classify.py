@@ -14,7 +14,7 @@ vlans.csv at ingest); every endpoint falls into exactly one category:
                   (the subnet's all-ones host). UNIVERSAL: a broadcast address is not a host,
                   so it shares one Broadcast bucket/colour rather than sitting in its VLAN.
 
-Category keys mirror `vlan_colours.category_key`: 'vlan_<id>' | 'public' | 'unassigned'
+Category keys mirror `broadcast_domain_colours.category_key`: 'vlan_<id>' | 'public' | 'unassigned'
 | 'multicast' | 'broadcast'.
 """
 from dataclasses import dataclass

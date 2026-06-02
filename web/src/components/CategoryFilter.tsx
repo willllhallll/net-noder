@@ -4,21 +4,13 @@ interface Props {
   categories: Category[];
   active: Set<string>;
   setActive: (s: Set<string>) => void;
-  nodeCount: number;
-  edgeCount: number;
 }
 
-// The hosts-view filter: one toggle row per endpoint category (each VLAN + the fixed
-// Public / Unassigned / Multicast / Broadcast buckets), driven entirely by the
-// /api/categories registry so it grows dynamically with the ingested VLAN set.
-// Unchecking a category hides its nodes (and, in App, any edges touching them).
-export default function VlanFilter({
-  categories,
-  active,
-  setActive,
-  nodeCount,
-  edgeCount,
-}: Props) {
+// The hosts/focus-view filter body: one unified toggle row per broadcast domain
+// (VLAN subnets sit alongside the Public / Unassigned / Multicast / Broadcast buckets with
+// no distinction), driven entirely by the /api/categories registry so it grows dynamically
+// with the ingested set. Unchecking a domain hides its nodes (and, in App, any edges touching them).
+export default function CategoryFilter({ categories, active, setActive }: Props) {
   const allOn = categories.length > 0 && active.size >= categories.length;
 
   function toggle(key: string) {
@@ -33,14 +25,8 @@ export default function VlanFilter({
   }
 
   return (
-    <div className="vlan-filter">
-      <div className="legend-title">
-        {nodeCount} endpoints · {edgeCount} connections
-      </div>
-
-      <button className="select-all-btn" onClick={toggleAll}>
-        {allOn ? "Deselect all" : "Select all"}
-      </button>
+    <div className="filter-section">
+      <span>Broadcast Domains</span>
 
       <div className="cat-list">
         {categories.map((c) => (
@@ -55,6 +41,10 @@ export default function VlanFilter({
           </label>
         ))}
       </div>
+
+      <button className="select-all-btn" onClick={toggleAll}>
+        {allOn ? "Deselect all" : "Select all"}
+      </button>
     </div>
   );
 }

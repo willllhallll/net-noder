@@ -90,27 +90,27 @@ PALETTE: tuple[str, ...] = (
 )
 
 
-# --- VLAN / endpoint-category colours -----------------------------------------
-# A dedicated palette for VLAN categories, DISJOINT from the protocol ANCHORS +
-# PALETTE above so a VLAN colour can never be confused with a protocol colour. These
-# were generated golden-angle in a distinct saturation/lightness band (muted mids,
+# --- Broadcast-domain colours -------------------------------------------------
+# A dedicated palette for VLAN-subnet broadcast domains, DISJOINT from the protocol
+# ANCHORS + PALETTE above so a domain colour can never be confused with a protocol colour.
+# These were generated golden-angle in a distinct saturation/lightness band (muted mids,
 # vs. the protocol palette's vivid hues) and verified collision-free against both
 # protocol sets. Drawn in vlan_id allocation order; past its length the same band's
-# golden-angle generator continues (see colour_for_vlan_seq).
-VLAN_PALETTE: tuple[str, ...] = (
+# golden-angle generator continues (see colour_for_domain_seq).
+BROADCAST_DOMAIN_PALETTE: tuple[str, ...] = (
     "#c87541", "#2e9e7a", "#c341c8", "#819e2e", "#417ec8", "#9e2e40",
     "#41c853", "#5e2e9e", "#c8a241", "#2e9d9e", "#c8419f", "#5c9e2e",
     "#4151c8", "#9e422e", "#41c880", "#832e9e",
 )
 
-# The fixed (non-VLAN) endpoint categories and their curated colours (seq = -1).
-# 'public'/'unassigned' get fresh hues; 'multicast'/'broadcast' deliberately match
-# the web's previous kind-based nodeColor so those nodes keep their familiar look.
+# The fixed (non-VLAN) broadcast domains and their curated colours (seq = -1).
+# 'public'/'unassigned' get fresh hues; 'multicast' purple and 'broadcast' red are the
+# single source for those domains' colours (served straight to the web, no JS fallback).
 FIXED_CATEGORY_COLOURS: dict[str, str] = {
     "public":     "#43a047",  # green
     "unassigned": "#78909c",  # blue-grey
-    "multicast":  "#a855f7",  # purple (matches the old kind-based nodeColor)
-    "broadcast":  "#ef4444",  # red    (matches the old kind-based nodeColor)
+    "multicast":  "#a855f7",  # purple
+    "broadcast":  "#ef4444",  # red
 }
 FIXED_CATEGORY_LABELS: dict[str, str] = {
     "public":     "Public",
@@ -123,7 +123,7 @@ FIXED_CATEGORY_ORDER: tuple[str, ...] = ("public", "unassigned", "multicast", "b
 
 
 # --- Shake-up schemes ----------------------------------------------------------
-# The stable ingest seeding (seed_layer_colours / seed_vlan_colours) is never touched
+# The stable ingest seeding (seed_layer_colours / seed_broadcast_domain_colours) is never touched
 # by any of this; these power the on-demand `netnoder-colors` re-allocation only.
 #
 # Generated schemes step hue by the golden angle and alternate two lightnesses for
@@ -205,14 +205,14 @@ def regenerate_layer_colours(
     return len(order)
 
 
-def regenerate_vlan_colours(
+def regenerate_broadcast_domain_colours(
     con: duckdb.DuckDBPyConnection, *, scheme: str, seed: int, keep_anchors: bool
 ) -> int:
-    """Wipe `vlan_colours` and re-allocate it with a fresh `scheme`; analogous to
-    regenerate_layer_colours. Fixed categories sort ahead of defined VLANs (vlan_id
-    order) and labels are preserved. The seed is offset so generated VLAN hues land
-    away from the protocol hues (best-effort; exact disjointness only holds for the
-    curated `shuffle` palettes). Returns rows written."""
+    """Wipe `broadcast_domain_colours` and re-allocate it with a fresh `scheme`; analogous
+    to regenerate_layer_colours. Fixed domains sort ahead of defined VLANs (vlan_id order)
+    and labels are preserved. The seed is offset so generated VLAN hues land away from the
+    protocol hues (best-effort; exact disjointness only holds for the curated `shuffle`
+    palettes). Returns rows written."""
     vlan_rows = con.execute("SELECT vlan_id, label FROM vlans ORDER BY vlan_id").fetchall()
     fixed = list(FIXED_CATEGORY_ORDER)
     vlan_keys = [f"vlan_{vid}" for vid, _ in vlan_rows]
@@ -223,54 +223,54 @@ def regenerate_vlan_colours(
     vseed = (seed ^ 0x5A5A5A5A) & 0xFFFFFFFF
     if keep_anchors:
         gen = generate_palette(len(vlan_keys), scheme, vseed,
-                               base=VLAN_PALETTE, overflow=colour_for_vlan_seq)
+                               base=BROADCAST_DOMAIN_PALETTE, overflow=colour_for_domain_seq)
         colours = dict(FIXED_CATEGORY_COLOURS)
         seqs = {key: -1 for key in fixed}
         for i, key in enumerate(vlan_keys):
             colours[key], seqs[key] = gen[i], i
     else:
         gen = generate_palette(len(order), scheme, vseed,
-                               base=VLAN_PALETTE, overflow=colour_for_vlan_seq)
+                               base=BROADCAST_DOMAIN_PALETTE, overflow=colour_for_domain_seq)
         colours = {key: gen[i] for i, key in enumerate(order)}
         seqs = {key: i for i, key in enumerate(order)}
 
-    con.execute("DELETE FROM vlan_colours")
+    con.execute("DELETE FROM broadcast_domain_colours")
     for key in order:
         con.execute(
-            "INSERT INTO vlan_colours VALUES (?, ?, ?, ?)",
+            "INSERT INTO broadcast_domain_colours VALUES (?, ?, ?, ?)",
             [key, labels[key], colours[key], seqs[key]],
         )
     return len(order)
 
 
-def colour_for_vlan_seq(seq: int) -> str:
-    """Colour for VLAN allocation slot `seq` (0-based), unbounded.
+def colour_for_domain_seq(seq: int) -> str:
+    """Colour for broadcast-domain allocation slot `seq` (0-based), unbounded.
 
-    Within the curated `VLAN_PALETTE` it returns the hand-verified hue; past its end
-    it continues the same muted-mid band golden-angle so colours stay distinct and the
+    Within the curated `BROADCAST_DOMAIN_PALETTE` it returns the hand-verified hue; past its
+    end it continues the same muted-mid band golden-angle so colours stay distinct and the
     scheme never runs out (very large VLAN counts are rare but supported)."""
-    if 0 <= seq < len(VLAN_PALETTE):
-        return VLAN_PALETTE[seq]
+    if 0 <= seq < len(BROADCAST_DOMAIN_PALETTE):
+        return BROADCAST_DOMAIN_PALETTE[seq]
     hue = (seq * 137.508 + 23) % 360
     light = 0.52 if seq % 2 == 0 else 0.40
     return _hsl_to_hex(hue, 0.55, light)
 
 
-def seed_vlan_colours(con: duckdb.DuckDBPyConnection) -> int:
-    """Seed/extend `vlan_colours` for the fixed categories + each defined VLAN.
+def seed_broadcast_domain_colours(con: duckdb.DuckDBPyConnection) -> int:
+    """Seed/extend `broadcast_domain_colours` for the fixed domains + each defined VLAN.
 
-    First-seen-wins: the four fixed categories are inserted once (seq = -1) and each
+    First-seen-wins: the four fixed domains are inserted once (seq = -1) and each
     `vlans.vlan_id` not already present takes the next unused VLAN slot and keeps it.
-    Existing rows are never touched, so a category's colour is stable across ingests.
+    Existing rows are never touched, so a domain's colour is stable across ingests.
     Returns rows newly added."""
     added = 0
-    # Fixed categories first (idempotent).
+    # Fixed domains first (idempotent).
     for key in FIXED_CATEGORY_ORDER:
         before = con.execute(
-            "SELECT 1 FROM vlan_colours WHERE category_key = ?", [key]
+            "SELECT 1 FROM broadcast_domain_colours WHERE category_key = ?", [key]
         ).fetchone()
         con.execute(
-            "INSERT OR IGNORE INTO vlan_colours VALUES (?, ?, ?, -1)",
+            "INSERT OR IGNORE INTO broadcast_domain_colours VALUES (?, ?, ?, -1)",
             [key, FIXED_CATEGORY_LABELS[key], FIXED_CATEGORY_COLOURS[key]],
         )
         if not before:
@@ -283,16 +283,16 @@ def seed_vlan_colours(con: duckdb.DuckDBPyConnection) -> int:
     for vlan_id, label in vlan_rows:
         key = f"vlan_{vlan_id}"
         if con.execute(
-            "SELECT 1 FROM vlan_colours WHERE category_key = ?", [key]
+            "SELECT 1 FROM broadcast_domain_colours WHERE category_key = ?", [key]
         ).fetchone():
             continue
         slot = con.execute(
-            "SELECT coalesce(max(seq), -1) + 1 FROM vlan_colours WHERE seq >= 0"
+            "SELECT coalesce(max(seq), -1) + 1 FROM broadcast_domain_colours WHERE seq >= 0"
         ).fetchone()[0]
         name = label if label else f"VLAN {vlan_id}"
         con.execute(
-            "INSERT INTO vlan_colours VALUES (?, ?, ?, ?)",
-            [key, name, colour_for_vlan_seq(slot), slot],
+            "INSERT INTO broadcast_domain_colours VALUES (?, ?, ?, ?)",
+            [key, name, colour_for_domain_seq(slot), slot],
         )
         added += 1
     return added

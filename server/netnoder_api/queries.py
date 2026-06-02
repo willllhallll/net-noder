@@ -47,7 +47,7 @@ def _load_classifier(cur) -> tuple[VlanClassifier, dict]:
     colours = {
         key: colour
         for key, colour in cur.execute(
-            "SELECT category_key, colour FROM vlan_colours"
+            "SELECT category_key, colour FROM broadcast_domain_colours"
         ).fetchall()
     }
     return VlanClassifier(vlans), colours
@@ -357,13 +357,13 @@ def search(cur, q: str, limit: int = 20) -> list[dict]:
 
 
 def categories(cur) -> list[dict]:
-    """The full category->colour registry for the filter legend.
+    """The full broadcast-domain->colour registry for the filter legend.
 
-    Returns every row in `vlan_colours` (VLANs first, ordered by their allocation seq,
-    then the fixed buckets in a stable display order) so the filter is complete even
-    for categories that have no visible endpoints in the current view."""
+    Returns every row in `broadcast_domain_colours` (VLANs first, ordered by their allocation
+    seq, then the fixed buckets in a stable display order) so the filter is complete even
+    for domains that have no visible endpoints in the current view."""
     rows = cur.execute(
-        "SELECT category_key, label, colour, seq FROM vlan_colours"
+        "SELECT category_key, label, colour, seq FROM broadcast_domain_colours"
     ).fetchall()
     fixed_rank = {k: i for i, k in enumerate(_FIXED_CATEGORY_ORDER)}
 

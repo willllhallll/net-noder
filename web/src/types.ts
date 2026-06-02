@@ -42,13 +42,13 @@ export interface NodeT {
   degree: number;
   first_seen: number | null;
   last_seen: number | null;
-  category: string; // 'vlan_<id>' | 'public' | 'unassigned' | 'multicast' | 'broadcast'
+  category: string; // broadcast domain: 'vlan_<id>' | 'public' | 'unassigned' | 'multicast' | 'broadcast'
   category_label: string; // friendly label, e.g. "VLAN 200" or "VLAN 200 (broadcast)"
   vlan_id: number | null;
-  colour: string; // category colour from vlan_colours
+  colour: string; // broadcast-domain colour from broadcast_domain_colours
 }
 
-// One endpoint colour category (a VLAN or a fixed bucket) for the hosts-view filter.
+// One broadcast domain (a VLAN subnet or a fixed bucket) for the hosts-view filter.
 export interface Category {
   category_key: string;
   label: string;
