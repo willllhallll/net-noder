@@ -101,8 +101,15 @@ def get_search(q: str, limit: int = Query(20, ge=1, le=100)):
     return queries.search(_cursor(), q, limit)
 
 
-# Mount the built web app last so /api/* routes take precedence.
-_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
+# Mount the built web app last so /api/* routes take precedence. The default points
+# at the in-repo build; NETNODER_WEB_DIST lets a packaged/containerised install (where
+# the source tree isn't alongside site-packages) point at the copied dist instead.
+_DIST = Path(
+    os.environ.get(
+        "NETNODER_WEB_DIST",
+        str(Path(__file__).resolve().parents[2] / "web" / "dist"),
+    )
+)
 if _DIST.exists():
     app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="web")
 

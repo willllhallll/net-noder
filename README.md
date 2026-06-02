@@ -87,6 +87,27 @@ manually outside the container, run that script.
    across `--reset`, so re-ingesting captures never loses them. They're shown in the
    UI (label toggle / search) read-only.
 
+## Run encapsulated with Docker
+
+To run the tool cleanly outside the dev container — with the same runtimes but none of
+the developer dependencies (no Claude Code, Prettier, editor extensions, editable
+installs, or Vite dev server) — use the bundled multi-stage `Dockerfile` and
+`docker-compose.yml`. The image builds the web app with Node 22, then runs everything on
+Python 3.12, with FastAPI serving the built UI **and** `/api` from a single port (8000).
+`./data` is bind-mounted, so the DuckDB store and your captures live on the host and
+survive rebuilds.
+
+```bash
+# 1. Put pcap/pcapng files in ./data/captures/, then dissect them into the store
+docker compose run --rm ingest data/captures/   # same flags as netnoder-ingest
+
+# 2. Serve the UI + API on one URL
+docker compose up                                # open http://localhost:8000
+```
+
+`docker compose down` stops it; the data volume persists. (The `ingest` service is under
+a `tools` profile, so `up` only starts the app.)
+
 ## Data model
 
 | table                  | meaning                                                                   |
@@ -119,6 +140,8 @@ itself is deleted. See
   `NETNODER_DB` (the single store), `NETNODER_NAMES` (names CSV, default
   `data/names.csv`), `NETNODER_SCRATCH`
 - `NETNODER_HOST` / `NETNODER_PORT` for the API
+- `NETNODER_WEB_DIST` — directory of the built web app to serve at `/` (defaults to the
+  in-repo `web/dist`; set by the Docker image to its copied bundle)
 
 ## Documentation
 

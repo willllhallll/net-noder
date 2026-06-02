@@ -1,0 +1,25 @@
+# Encapsulated local deployment for net-noder.
+#
+#   docker compose run --rm ingest data/captures/   # build pcaps -> data/netnoder.duckdb
+#   docker compose up                               # serve UI + API on http://localhost:8000
+#
+# ./data is bind-mounted into both services, so the DuckDB store and captures live on the
+# host and survive image rebuilds.
+
+services:
+  netnoder: # the app: built React UI + FastAPI /api on one port
+    build: .
+    image: net-noder
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  ingest: # one-shot: dissect pcaps in ./data/captures/ into the DuckDB store
+    build: .
+    image: net-noder
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["netnoder-ingest"]
+    profiles: ["tools"] # only runs when explicitly invoked, not on `up`

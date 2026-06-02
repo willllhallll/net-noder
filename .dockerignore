@@ -1,0 +1,39 @@
+# Keep the Docker build context clean: no dev artefacts or runtime data should ever
+# leak into the image. Mirrors .gitignore.
+.git
+.gitignore
+.devcontainer
+.claude
+.claudeignore
+.vscode
+
+# Python dev / build artefacts
+.venv
+venv
+**/__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+build
+dist
+
+# Node / web (node_modules is reinstalled in-image; dist is rebuilt in-image)
+**/node_modules
+web/dist
+
+# Local run PIDs + logs
+.run
+*.log
+
+# Runtime data (mounted as a volume at run time, never baked in)
+data
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.pcap
+*.pcapng
+
+# Docker files themselves + plans
+Dockerfile
+docker-compose.yml
+.dockerignore
