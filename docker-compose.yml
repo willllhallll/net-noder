@@ -23,3 +23,35 @@ services:
       - ./data:/app/data
     entrypoint: ["netnoder-ingest"]
     profiles: ["tools"] # only runs when explicitly invoked, not on `up`
+
+  colors: # one-shot: update pallets
+    build: .
+    image: net-noder
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["netnoder-colors"]
+    profiles: ["tools"] # only runs when explicitly invoked, not on `up`
+
+  names: # one-shot: reload all hostnames
+    build: .
+    image: net-noder
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["netnoder-names"]
+    profiles: ["tools"] # only runs when explicitly invoked, not on `up`
+
+  vlans: # one-shot: reload all vlans
+    build: .
+    image: net-noder
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["netnoder-vlans"]
+    profiles: ["tools"] # only runs when explicitly invoked, not on `up`
+
+  whois: # one-shot: fetch all whois info
+    build: .
+    image: net-noder
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["netnoder-whois"]
+    profiles: ["tools"] # only runs when explicitly invoked, not on `up`
